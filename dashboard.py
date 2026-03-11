@@ -9,7 +9,6 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -21,6 +20,7 @@ from src.analytics import (
     compute_flow_metrics,
     compute_performance_metrics,
     compute_subordination_ratios,
+    fetch_cdi_monthly,
     format_brl,
     format_pct,
     get_alert_flags,
@@ -226,20 +226,25 @@ def load_data(start_str: str, end_str: str):
 
     data_dirs = download_monthly_zips(start_date, end_date)
     if not data_dirs:
-        return None, None, None
+        return None, None, None, None
 
     tables = parse_all_tables(data_dirs, cnpjs)
     if not tables:
-        return None, None, None
+        return None, None, None, None
 
     kpi_df = extract_kpis(tables)
     if kpi_df.empty:
-        return None, None, None
+        return None, None, None, None
 
     kpi_df = compute_trends(kpi_df)
     per_class = extract_per_class_data(tables)
 
-    return kpi_df, tables, per_class
+    # Fetch CDI benchmark
+    cdi_start = f"01/{start_parts[1]}/{start_parts[0]}"
+    cdi_end = f"28/{end_parts[1]}/{end_parts[0]}"
+    cdi_df = fetch_cdi_monthly(cdi_start, cdi_end)
+
+    return kpi_df, tables, per_class, cdi_df
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -288,7 +293,7 @@ start_str = start_month.strftime("%Y-%m")
 end_str = end_month.strftime("%Y-%m")
 
 with st.spinner("Carregando dados do CVM..."):
-    kpi_df, tables, per_class = load_data(start_str, end_str)
+    kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str)
 
 if kpi_df is None or kpi_df.empty:
     st.error("Nenhum dado disponivel. Verifique a conexao e o periodo selecionado.")
@@ -516,20 +521,56 @@ with tab_subordination:
 
     if sub_ratios is not None and not sub_ratios.empty:
         sub_latest = sub_ratios.iloc[-1]
+        sub_prev = sub_ratios.iloc[-2] if len(sub_ratios) > 1 else None
 
-        # Summary cards
+        def _sub_delta(col):
+            if sub_prev is None:
+                return None
+            v, p = sub_latest.get(col), sub_prev.get(col)
+            if pd.notna(v) and pd.notna(p):
+                diff = v - p
+                return f"{diff:+.2f}pp"
+            return None
+
+        # Summary cards with MoM deltas
         sc1, sc2, sc3, sc4 = st.columns(4)
         with sc1:
-            st.metric("PL Total", format_brl(sub_latest.get("PL_Total")))
+            pl_delta = None
+            if sub_prev is not None:
+                pl_v, pl_p = sub_latest.get("PL_Total"), sub_prev.get("PL_Total")
+                if pd.notna(pl_v) and pd.notna(pl_p) and pl_p != 0:
+                    pl_delta = f"{(pl_v - pl_p) / pl_p * 100:+.2f}%"
+            st.metric("PL Total", format_brl(sub_latest.get("PL_Total")), pl_delta)
         with sc2:
-            st.metric("Subordinacao Senior", format_pct(sub_latest.get("Subordinacao_Senior_%")))
+            st.metric(
+                "Subordinacao Senior",
+                format_pct(sub_latest.get("Subordinacao_Senior_%")),
+                _sub_delta("Subordinacao_Senior_%"),
+            )
         with sc3:
-            st.metric("Subordinacao Mezanino", format_pct(sub_latest.get("Subordinacao_Mezanino_%")))
+            st.metric(
+                "Subordinacao Mezanino",
+                format_pct(sub_latest.get("Subordinacao_Mezanino_%")),
+                _sub_delta("Subordinacao_Mezanino_%"),
+            )
         with sc4:
-            # Show senior share
-            st.metric("Senior Share", format_pct(sub_latest.get("Senior_%")))
+            st.metric(
+                "Senior Share",
+                format_pct(sub_latest.get("Senior_%")),
+                _sub_delta("Senior_%"),
+            )
 
         st.markdown("")
+
+        # Class filter for PL composition chart
+        pl_cols = [c for c in sub_ratios.columns if c.startswith("PL_") and not c.endswith("%") and c != "PL_Total"]
+        if pl_cols:
+            sub_class_filter = st.multiselect(
+                "Filtrar classes:", pl_cols, default=pl_cols,
+                key="sub_class_filter",
+            )
+        else:
+            sub_class_filter = []
 
         col1, col2 = st.columns(2)
 
@@ -546,10 +587,9 @@ with tab_subordination:
 
         with col2:
             # PL composition over time (stacked area)
-            pl_cols = [c for c in sub_ratios.columns if c.startswith("PL_") and not c.endswith("%") and c != "PL_Total"]
-            if pl_cols:
+            if sub_class_filter:
                 fig = styled_area_chart(
-                    sub_ratios, "DT_COMPTC", pl_cols,
+                    sub_ratios, "DT_COMPTC", sub_class_filter,
                     "Composicao do PL por Classe", y_format="brl",
                     colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
                 )
@@ -619,12 +659,27 @@ with tab_performance:
             st.plotly_chart(fig, use_container_width=True, key="perf_pl")
 
     with col2:
+        # Rentabilidade vs CDI benchmark
         if "Rentabilidade_%" in perf_metrics.columns:
-            fig = styled_bar_chart(
-                perf_metrics, "DT_COMPTC", ["Rentabilidade_%"],
-                "Rentabilidade Mensal", y_format="pct",
-                colors=[COLORS["success"]],
-            )
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=perf_metrics["DT_COMPTC"], y=perf_metrics["Rentabilidade_%"],
+                name="Fundo", marker_color=COLORS["success"], opacity=0.9,
+            ))
+            if cdi_df is not None and not cdi_df.empty:
+                merged_cdi = perf_metrics[["DT_COMPTC"]].merge(
+                    cdi_df, on="DT_COMPTC", how="left",
+                )
+                if "CDI_%" in merged_cdi.columns and merged_cdi["CDI_%"].notna().any():
+                    fig.add_trace(go.Scatter(
+                        x=merged_cdi["DT_COMPTC"], y=merged_cdi["CDI_%"],
+                        name="CDI", mode="lines+markers",
+                        line=dict(color=COLORS["warning"], width=2.5, dash="dot"),
+                        marker=dict(size=5),
+                    ))
+            fig.update_layout(**CHART_LAYOUT, title="Rentabilidade Mensal vs CDI")
+            fig.update_yaxes(ticksuffix="%")
+            fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
             st.plotly_chart(fig, use_container_width=True, key="perf_rentab")
 
     col3, col4 = st.columns(2)
@@ -634,12 +689,17 @@ with tab_performance:
         cota_df = per_class.get("cota_por_classe")
         if cota_df is not None and not cota_df.empty:
             cota_cols = [c for c in cota_df.columns if c != "DT_COMPTC"]
-            fig = styled_line_chart(
-                cota_df, "DT_COMPTC", cota_cols,
-                "Valor da Cota por Classe", y_format="brl",
-                colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+            perf_class_filter = st.multiselect(
+                "Filtrar classes:", cota_cols, default=cota_cols,
+                key="perf_class_filter",
             )
-            st.plotly_chart(fig, use_container_width=True, key="perf_cota")
+            if perf_class_filter:
+                fig = styled_line_chart(
+                    cota_df, "DT_COMPTC", perf_class_filter,
+                    "Valor da Cota por Classe", y_format="brl",
+                    colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+                )
+                st.plotly_chart(fig, use_container_width=True, key="perf_cota")
 
     with col4:
         if "Nr_Cotistas" in perf_metrics.columns:

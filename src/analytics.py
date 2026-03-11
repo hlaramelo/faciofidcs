@@ -6,6 +6,7 @@ and fund performance — the metrics that matter for credit investors.
 
 import pandas as pd
 import numpy as np
+import requests
 
 
 def compute_subordination_ratios(per_class: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
@@ -272,6 +273,33 @@ def get_alert_flags(kpi_df: pd.DataFrame, per_class: dict[str, pd.DataFrame]) ->
         })
 
     return alerts
+
+
+def fetch_cdi_monthly(start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch monthly CDI accumulated rate from BCB SGS API.
+
+    Series 4391 = CDI monthly accumulated rate (%).
+    start_date/end_date in 'DD/MM/YYYY' format.
+    Returns DataFrame with columns [DT_COMPTC, CDI_%].
+    """
+    url = (
+        "https://api.bcb.gov.br/dados/serie/bcdata.sgs.4391/dados"
+        f"?formato=json&dataInicial={start_date}&dataFinal={end_date}"
+    )
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return pd.DataFrame(columns=["DT_COMPTC", "CDI_%"])
+
+    if not data:
+        return pd.DataFrame(columns=["DT_COMPTC", "CDI_%"])
+
+    df = pd.DataFrame(data)
+    df["DT_COMPTC"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
+    df["CDI_%"] = pd.to_numeric(df["valor"], errors="coerce")
+    return df[["DT_COMPTC", "CDI_%"]].sort_values("DT_COMPTC").reset_index(drop=True)
 
 
 def format_brl(value: float | None) -> str:
