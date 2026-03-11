@@ -5,7 +5,7 @@ Run with: streamlit run dashboard.py
 """
 
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -14,7 +14,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import DATA_DIR, DEFAULT_MONTHS_BACK, FUNDS
+from config import DATA_DIR, FUNDS
 from src.analytics import (
     compute_credit_quality_metrics,
     compute_flow_metrics,
@@ -256,18 +256,21 @@ with st.sidebar:
     selected_fund = next(f for f in FUNDS if f["name"] == selected_fund_name)
     fund_name = selected_fund["name"]
     st.markdown(f"**CNPJ:** {selected_fund['cnpj']}")
+    if selected_fund.get("status"):
+        status_color = "#22c55e" if selected_fund["status"] == "Operacional" else "#f59e0b"
+        st.markdown(f"**Status:** <span style='color:{status_color}'>{selected_fund['status']}</span>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("##### Periodo de Analise")
 
     today = date.today()
-    default_start = today - timedelta(days=DEFAULT_MONTHS_BACK * 31)
+    fund_start = date.fromisoformat(selected_fund["start_date"])
 
     col_s1, col_s2 = st.columns(2)
     with col_s1:
         start_month = st.date_input(
             "De",
-            value=default_start.replace(day=1),
+            value=fund_start,
             format="YYYY-MM-DD",
         )
     with col_s2:
