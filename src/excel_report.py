@@ -249,6 +249,90 @@ def write_time_series_sheet(
     ws.add_chart(chart, f"A{chart_row}")
 
 
+def write_per_class_sheet(
+    wb: Workbook,
+    class_df: pd.DataFrame,
+    sheet_name: str,
+    chart_title: str,
+    chart_type: str = "line",
+):
+    """Create a sheet with per-class time series data and chart.
+
+    class_df should have DT_COMPTC as first column and one column per class.
+    """
+    ws = wb.create_sheet(title=sheet_name[:31])
+
+    if class_df is None or class_df.empty:
+        ws["A1"] = "Sem dados disponiveis"
+        return
+
+    value_cols = [c for c in class_df.columns if c != "DT_COMPTC"]
+    if not value_cols:
+        ws["A1"] = "Sem dados disponiveis"
+        return
+
+    # Skip if all values are NaN
+    if class_df[value_cols].isna().all().all():
+        ws["A1"] = "Sem dados disponiveis para este indicador"
+        return
+
+    # Write headers
+    display_cols = ["DT_COMPTC"] + value_cols
+    subset = class_df[display_cols].copy()
+    subset["DT_COMPTC"] = pd.to_datetime(subset["DT_COMPTC"]).dt.strftime("%Y-%m")
+
+    ws.cell(row=1, column=1, value="Mes")
+    for col_idx, col_name in enumerate(value_cols, 2):
+        ws.cell(row=1, column=col_idx, value=col_name)
+    style_header_row(ws, 1, len(display_cols))
+
+    # Data rows
+    for row_idx, (_, data_row) in enumerate(subset.iterrows(), 2):
+        ws.cell(row=row_idx, column=1, value=data_row["DT_COMPTC"]).border = THIN_BORDER
+        for col_idx, col_name in enumerate(value_cols, 2):
+            cell = ws.cell(row=row_idx, column=col_idx, value=data_row[col_name])
+            cell.border = THIN_BORDER
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = BRL_FORMAT
+
+    num_data_rows = len(subset)
+    auto_column_width(ws)
+
+    if num_data_rows < 2:
+        return
+
+    # Create chart
+    if chart_type == "area":
+        chart = AreaChart()
+        chart.style = 10
+    elif chart_type == "bar":
+        chart = BarChart()
+        chart.style = 10
+        chart.grouping = "stacked"
+    else:
+        chart = LineChart()
+        chart.style = 10
+
+    chart.title = chart_title
+    chart.x_axis.title = "Mes"
+    chart.y_axis.title = "Valor (R$)"
+    chart.width = 25
+    chart.height = 15
+
+    cats = Reference(ws, min_col=1, min_row=2, max_row=1 + num_data_rows)
+    chart.set_categories(cats)
+
+    colors = ["2F5496", "ED7D31", "70AD47", "FFC000", "5B9BD5", "A5A5A5"]
+    for i, col_idx in enumerate(range(2, len(display_cols) + 1)):
+        data = Reference(ws, min_col=col_idx, min_row=1, max_row=1 + num_data_rows)
+        chart.add_data(data, titles_from_data=True)
+        if i < len(colors):
+            chart.series[i].graphicalProperties.solidFill = colors[i]
+
+    chart_row = num_data_rows + 4
+    ws.add_chart(chart, f"A{chart_row}")
+
+
 def write_raw_data_sheet(wb: Workbook, tables: dict[str, pd.DataFrame]):
     """Write raw data sheets for reference."""
     for table_name, df in tables.items():
@@ -280,6 +364,7 @@ def generate_report(
     tables: dict[str, pd.DataFrame],
     output_path: Path,
     fund_name: str = "Facio FIDC Financeiros RL",
+    per_class: dict[str, pd.DataFrame] | None = None,
 ):
     """Generate the complete Excel report with dashboard and charts.
 
@@ -288,7 +373,9 @@ def generate_report(
         tables: Raw parsed tables for the Raw Data sheet.
         output_path: Where to save the .xlsx file.
         fund_name: Fund display name for the title.
+        per_class: Optional dict with per-class DataFrames (pl_por_classe, cota_por_classe).
     """
+    per_class = per_class or {}
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     wb = Workbook()
@@ -334,6 +421,19 @@ def generate_report(
     if inad_cols:
         write_time_series_sheet(
             wb, kpi_df, "Inadimplencia", inad_cols, "Inadimplencia e Provisoes", "bar"
+        )
+
+    # Per-class sheets
+    if "pl_por_classe" in per_class:
+        write_per_class_sheet(
+            wb, per_class["pl_por_classe"],
+            "PL por Classe", "Patrimonio Liquido por Classe", "area"
+        )
+
+    if "cota_por_classe" in per_class:
+        write_per_class_sheet(
+            wb, per_class["cota_por_classe"],
+            "Cota por Classe", "Valor da Cota por Classe", "line"
         )
 
     # Raw Data sheets

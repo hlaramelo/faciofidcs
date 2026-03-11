@@ -190,6 +190,171 @@ def compute_trends(kpi_df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """Extract per-class time series for PL and Valor da Cota.
+
+    Returns dict with keys like 'pl_por_classe', 'cota_por_classe',
+    each containing a DataFrame with DT_COMPTC as index and one column per class.
+    """
+    result = {}
+
+    # --- PL por Classe ---
+    # Try tab_IV first (PL by class), then tab_I with CLASSE column
+    pl_class_df = _pivot_by_class(
+        tables,
+        table_priority=["tab_IV", "tab_I"],
+        value_patterns=[r"VL_PATRIM_LIQ", r"TAB_IV.*PATRIM", r"TAB_IV.*VL_PL",
+                        r"TAB_I2.*PATRIM", r"VL_PL"],
+        label="PL",
+    )
+    if pl_class_df is not None:
+        result["pl_por_classe"] = pl_class_df
+
+    # --- Valor da Cota por Classe ---
+    # Try tab_X_2/3/4 (quota details per class type), then tab_I
+    cota_class_df = _pivot_by_class(
+        tables,
+        table_priority=["tab_X_2", "tab_X_3", "tab_X_4", "tab_I"],
+        value_patterns=[r"TAB_X_VL_COTA", r"TAB_X.*VL_COTA\b",
+                        r"TAB_I2C5_VL_COTA", r"VL_COTA"],
+        label="Cota",
+    )
+    if cota_class_df is not None:
+        result["cota_por_classe"] = cota_class_df
+
+    return result
+
+
+def _pivot_by_class(
+    tables: dict[str, pd.DataFrame],
+    table_priority: list[str],
+    value_patterns: list[str],
+    label: str,
+) -> pd.DataFrame | None:
+    """Pivot a table by class, producing one column per class over time.
+
+    Searches tables in priority order. Looks for a class identifier column
+    and a numeric value column matching the patterns.
+    """
+    # Possible class identifier columns
+    class_col_candidates = [
+        "CLASSE", "TAB_X_CLASSE_SERIE", "CLASSE_SERIE",
+        "TP_CLASSE", "DS_CLASSE",
+    ]
+
+    for table_name in table_priority:
+        df = tables.get(table_name)
+        if df is None or df.empty or "DT_COMPTC" not in df.columns:
+            continue
+
+        # Find class column
+        class_col = None
+        for cc in class_col_candidates:
+            if cc in df.columns:
+                unique_vals = df[cc].dropna().unique()
+                if len(unique_vals) > 1:
+                    class_col = cc
+                    break
+
+        if class_col is None:
+            # For tab_X_2/3/4, use the table name itself as class identifier
+            if table_name.startswith("tab_X_"):
+                class_map = {
+                    "tab_X_2": "Senior",
+                    "tab_X_3": "Mezanino",
+                    "tab_X_4": "Subordinada",
+                }
+                if table_name in class_map:
+                    return _build_from_separate_tables(
+                        tables, class_map, value_patterns, label
+                    )
+            continue
+
+        # Find value column
+        value_col = None
+        for col in df.columns:
+            for pattern in value_patterns:
+                if re.search(pattern, col, re.IGNORECASE):
+                    values = pd.to_numeric(df[col], errors="coerce")
+                    if not values.isna().all():
+                        value_col = col
+                        break
+            if value_col:
+                break
+
+        if value_col is None:
+            continue
+
+        # Pivot: rows=date, columns=class, values=numeric value
+        pivot_df = df[["DT_COMPTC", class_col, value_col]].copy()
+        pivot_df[value_col] = pd.to_numeric(pivot_df[value_col], errors="coerce")
+        pivot_df = pivot_df.dropna(subset=[value_col])
+
+        if pivot_df.empty:
+            continue
+
+        pivoted = pivot_df.pivot_table(
+            index="DT_COMPTC",
+            columns=class_col,
+            values=value_col,
+            aggfunc="first",
+        )
+
+        if pivoted.empty or pivoted.columns.empty:
+            continue
+
+        # Clean column names
+        pivoted.columns = [f"{label} - {str(c).strip()}" for c in pivoted.columns]
+        pivoted = pivoted.reset_index().sort_values("DT_COMPTC")
+
+        print(f"  Per-class {label}: {len(pivoted)} months, classes: {list(pivoted.columns[1:])}")
+        return pivoted
+
+    return None
+
+
+def _build_from_separate_tables(
+    tables: dict[str, pd.DataFrame],
+    class_map: dict[str, str],
+    value_patterns: list[str],
+    label: str,
+) -> pd.DataFrame | None:
+    """Build per-class DataFrame from separate tab_X_2/3/4 tables."""
+    frames = []
+
+    for table_name, class_name in class_map.items():
+        df = tables.get(table_name)
+        if df is None or df.empty or "DT_COMPTC" not in df.columns:
+            continue
+
+        # Find value column
+        for col in df.columns:
+            for pattern in value_patterns:
+                if re.search(pattern, col, re.IGNORECASE):
+                    values = pd.to_numeric(df[col], errors="coerce")
+                    if not values.isna().all():
+                        series_df = df[["DT_COMPTC"]].copy()
+                        series_df[f"{label} - {class_name}"] = values
+                        # Aggregate by date (in case of duplicates)
+                        series_df = series_df.groupby("DT_COMPTC").first().reset_index()
+                        frames.append(series_df)
+                        break
+            if frames and frames[-1].columns[-1].endswith(class_name):
+                break
+
+    if not frames:
+        return None
+
+    # Merge all class series on date
+    result = frames[0]
+    for f in frames[1:]:
+        result = result.merge(f, on="DT_COMPTC", how="outer")
+
+    result = result.sort_values("DT_COMPTC").reset_index(drop=True)
+    print(f"  Per-class {label}: {len(result)} months, classes: {list(result.columns[1:])}")
+    return result
+
+
 def get_latest_summary(kpi_df: pd.DataFrame) -> dict:
     """Get the latest month's KPI values as a summary dict."""
     if kpi_df.empty:

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_DIR, DEFAULT_MONTHS_BACK, FUNDS, OUTPUT_DIR
 from src.downloader import download_monthly_zips
 from src.excel_report import generate_report
-from src.kpi_extractor import compute_trends, extract_kpis
+from src.kpi_extractor import compute_trends, extract_kpis, extract_per_class_data
 from src.parser import discover_columns, parse_all_tables
 
 
@@ -156,9 +156,12 @@ def main():
     kpi_df = compute_trends(kpi_df)
     print(f"  Extracted {len(kpi_df)} monthly data points")
 
+    # Extract per-class breakdowns
+    per_class = extract_per_class_data(tables)
+
     # Step 4: Generate report
     print(f"\n[4/4] Generating Excel report...")
-    generate_report(kpi_df, tables, output_path, fund_name)
+    generate_report(kpi_df, tables, output_path, fund_name, per_class)
 
     print(f"\n{'='*60}")
     print(f"  Done! Report saved to: {output_path}")
