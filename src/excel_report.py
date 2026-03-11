@@ -171,6 +171,11 @@ def write_time_series_sheet(
         ws["A1"] = f"Colunas nao encontradas: {', '.join(value_columns)}"
         return
 
+    # Skip sheet if all value columns are entirely NaN
+    if kpi_df[available_cols].isna().all().all():
+        ws["A1"] = "Sem dados disponiveis para este indicador"
+        return
+
     # Write data
     display_cols = ["DT_COMPTC"] + available_cols
     subset = kpi_df[display_cols].copy()
@@ -182,13 +187,22 @@ def write_time_series_sheet(
         ws.cell(row=1, column=col_idx, value=display_name)
     style_header_row(ws, 1, len(display_cols))
 
+    # Determine which columns are percentage-based
+    pct_keywords = {"RENTAB", "%", "PCT", "TAXA"}
+
     # Data rows
     for row_idx, (_, data_row) in enumerate(subset.iterrows(), 2):
         for col_idx, col_name in enumerate(display_cols, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=data_row[col_name])
             cell.border = THIN_BORDER
             if col_idx > 1 and isinstance(cell.value, (int, float)):
-                cell.number_format = BRL_FORMAT
+                display_name = KPI_DISPLAY_NAMES.get(col_name, col_name).upper()
+                if any(kw in col_name.upper() or kw in display_name for kw in pct_keywords):
+                    cell.number_format = '0.00"%"'
+                elif "NR_" in col_name.upper() or "QT_" in col_name.upper():
+                    cell.number_format = INTEGER_FORMAT
+                else:
+                    cell.number_format = BRL_FORMAT
 
     num_data_rows = len(subset)
     auto_column_width(ws)
@@ -210,7 +224,11 @@ def write_time_series_sheet(
 
     chart.title = chart_title
     chart.x_axis.title = "Mes"
-    chart.y_axis.title = "Valor (R$)"
+    # Use appropriate Y-axis label based on data type
+    if any(kw in chart_title.upper() for kw in ["RENTAB", "%", "TAXA"]):
+        chart.y_axis.title = "%"
+    else:
+        chart.y_axis.title = "Valor (R$)"
     chart.width = 25
     chart.height = 15
 
