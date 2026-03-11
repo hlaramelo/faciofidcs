@@ -1,6 +1,6 @@
 # Facio FIDC Monitor
 
-Automated monitoring tool for Facio's FIDC funds. Downloads monthly reports from CVM's Open Data Portal, extracts core financial KPIs, and generates Excel reports with charts.
+Professional monitoring dashboard for Facio's FIDC funds. Downloads monthly reports from CVM's Open Data Portal, extracts financial KPIs, and presents them in an interactive Streamlit dashboard designed for credit investors.
 
 ## Monitored Fund
 
@@ -16,9 +16,33 @@ To add more funds, edit `config.py` and add entries to the `FUNDS` list.
 pip install -r requirements.txt
 ```
 
-Requires Python 3.9+.
+Requires Python 3.10+.
 
-## Usage
+## Dashboard (Recommended)
+
+```bash
+streamlit run dashboard.py
+```
+
+Opens an interactive dashboard with 5 tabs:
+
+- **Visao Geral** — KPI cards with traffic-light alerts, PL and default rate trends
+- **Qualidade de Credito** — Default rate evolution, NPL breakdown, provisioning coverage
+- **Subordinacao** — Credit enhancement ratios by tranche, PL composition by class
+- **Performance** — Returns, quota values per class, PL evolution, quotaholder count
+- **Fluxo da Carteira** — Acquisitions vs redemptions, net flow, substitutions
+
+### Features
+
+- Automated alert flags (default rate spikes, PL drops, low subordination)
+- Interactive Plotly charts with hover details
+- Date range picker in sidebar
+- Raw data browser with CSV export
+- Data cached for 1 hour to avoid redundant CVM downloads
+
+## CLI (Excel Report)
+
+The original CLI is still available for generating static Excel reports:
 
 ```bash
 # Download last 12 months and generate report
@@ -32,39 +56,13 @@ python main.py --update
 
 # Debug: show available CVM data columns
 python main.py --discover
-
-# Custom output path
-python main.py --output /path/to/report.xlsx
 ```
-
-The report is saved to `output/facio_fidc_report.xlsx` by default.
-
-## Report Contents
-
-The Excel report contains:
-
-1. **Dashboard** - Summary of latest KPIs with month-over-month changes
-2. **PL Evolution** - Patrimonio Liquido time series with area chart
-3. **Quota Values** - Quota value per class (Senior, Mezanino, Subordinada) with line chart
-4. **Credit Rights** - Performing vs non-performing credit rights with stacked bar chart
-5. **Raw Data** - Full historical data tables for reference
-
-## Core KPIs
-
-- Patrimonio Liquido (PL) - Net assets
-- Valor da Cota - Quota value per class
-- Numero de Cotistas - Number of shareholders
-- Direitos Creditorios - Credit rights (performing vs non-performing)
-- Inadimplencia / Perdas - Default rates and losses
-- Ativo Total - Total assets
-- Aquisicoes / Resgates - Acquisitions and redemptions
 
 ## Scheduling (Cron)
 
 To run automatically on the 15th of each month (after CVM's filing deadline):
 
 ```bash
-# Edit crontab
 crontab -e
 
 # Add this line (adjust path):
@@ -73,16 +71,18 @@ crontab -e
 
 ## Data Source
 
-Data is sourced from the [CVM Open Data Portal](https://dados.cvm.gov.br/dataset/fidc-doc-inf_mensal) - structured CSV files published monthly by Brazil's securities regulator.
+Data is sourced from the [CVM Open Data Portal](https://dados.cvm.gov.br/dataset/fidc-doc-inf_mensal) — structured CSV files published monthly by Brazil's securities regulator.
 
 ## Project Structure
 
 ```
 faciofidcs/
-├── main.py              # CLI entry point
+├── dashboard.py         # Streamlit dashboard (main entry point)
+├── main.py              # CLI entry point (Excel reports)
 ├── config.py            # Fund CNPJs, settings, paths
 ├── requirements.txt     # Python dependencies
 ├── src/
+│   ├── analytics.py     # Credit quality, subordination, flow analytics
 │   ├── downloader.py    # Downloads ZIP files from CVM
 │   ├── parser.py        # Parses CSVs, filters by CNPJ
 │   ├── kpi_extractor.py # Computes KPIs from raw data
