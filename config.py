@@ -18,16 +18,19 @@ FUNDS = [
         "name": "Facio FIDC Financeiros RL",
         "cnpj": "51.119.641/0001-09",
         "cnpj_raw": "51119641000109",
-    },
-    {
-        "name": "Facio 2 FIDC",
-        "cnpj": "46.955.383/0001-52",
-        "cnpj_raw": "46955383000152",
+        "status": "Em Liquidacao",
     },
     {
         "name": "Facio 3 FIDC RL",
         "cnpj": "60.736.775/0001-51",
         "cnpj_raw": "60736775000151",
+        "status": "Operacional",
+    },
+    {
+        "name": "Facio 4 FIDC Financeiros RL",
+        "cnpj": "62.627.291/0001-08",
+        "cnpj_raw": "62627291000108",
+        "status": "Operacional",
     },
 ]
 
