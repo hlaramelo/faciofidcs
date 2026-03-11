@@ -115,6 +115,13 @@ st.markdown("""
 
 # ── Chart theme ──────────────────────────────────────────────────────────────
 
+def _hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
+    """Convert a hex color like '#3b82f6' to 'rgba(r,g,b,a)' for plotly."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 COLORS = {
     "primary": "#3b82f6",
     "success": "#22c55e",
@@ -192,7 +199,7 @@ def styled_area_chart(df, x, y_cols, title, y_format=None, colors=None):
             x=df[x], y=df[col], name=col, mode="lines",
             fill="tonexty" if i > 0 else "tozeroy",
             line=dict(color=palette[i % len(palette)], width=1),
-            fillcolor=palette[i % len(palette)] + "40",
+            fillcolor=_hex_to_rgba(palette[i % len(palette)], 0.25),
         ))
     fig.update_layout(**CHART_LAYOUT, title=title)
     if y_format == "brl":
