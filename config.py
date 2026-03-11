@@ -19,6 +19,16 @@ FUNDS = [
         "cnpj": "51.119.641/0001-09",
         "cnpj_raw": "51119641000109",
     },
+    {
+        "name": "Facio 2 FIDC",
+        "cnpj": "46.955.383/0001-52",
+        "cnpj_raw": "46955383000152",
+    },
+    {
+        "name": "Facio 3 FIDC RL",
+        "cnpj": "60.736.775/0001-51",
+        "cnpj_raw": "60736775000151",
+    },
 ]
 
 # Default date range (last 12 months if not specified)

@@ -213,8 +213,8 @@ def styled_area_chart(df, x, y_cols, title, y_format=None, colors=None):
 # ── Data loading ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_data(start_str: str, end_str: str):
-    """Download, parse, and extract KPIs. Cached for 1 hour."""
+def load_data(start_str: str, end_str: str, cnpj_raw: str):
+    """Download, parse, and extract KPIs for a single fund. Cached for 1 hour."""
     from datetime import date as d
 
     start_parts = start_str.split("-")
@@ -222,13 +222,11 @@ def load_data(start_str: str, end_str: str):
     start_date = d(int(start_parts[0]), int(start_parts[1]), 1)
     end_date = d(int(end_parts[0]), int(end_parts[1]), 1)
 
-    cnpjs = [f["cnpj_raw"] for f in FUNDS]
-
     data_dirs = download_monthly_zips(start_date, end_date)
     if not data_dirs:
         return None, None, None, None
 
-    tables = parse_all_tables(data_dirs, cnpjs)
+    tables = parse_all_tables(data_dirs, [cnpj_raw])
     if not tables:
         return None, None, None, None
 
@@ -253,9 +251,11 @@ with st.sidebar:
     st.markdown("### Facio FIDC Monitor")
     st.markdown("---")
 
-    fund_name = FUNDS[0]["name"]
-    st.markdown(f"**Fundo:** {fund_name}")
-    st.markdown(f"**CNPJ:** {FUNDS[0]['cnpj']}")
+    fund_names = [f["name"] for f in FUNDS]
+    selected_fund_name = st.selectbox("Fundo", fund_names)
+    selected_fund = next(f for f in FUNDS if f["name"] == selected_fund_name)
+    fund_name = selected_fund["name"]
+    st.markdown(f"**CNPJ:** {selected_fund['cnpj']}")
 
     st.markdown("---")
     st.markdown("##### Periodo de Analise")
@@ -293,7 +293,7 @@ start_str = start_month.strftime("%Y-%m")
 end_str = end_month.strftime("%Y-%m")
 
 with st.spinner("Carregando dados do CVM..."):
-    kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str)
+    kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str, selected_fund["cnpj_raw"])
 
 if kpi_df is None or kpi_df.empty:
     st.error("Nenhum dado disponivel. Verifique a conexao e o periodo selecionado.")
@@ -826,7 +826,7 @@ with st.sidebar:
         st.download_button(
             "Download KPIs (CSV)",
             csv_export,
-            file_name="facio_fidc_kpis.csv",
+            file_name=f"{fund_name.lower().replace(' ', '_')}_kpis.csv",
             mime="text/csv",
             use_container_width=True,
         )
