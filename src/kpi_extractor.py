@@ -176,14 +176,24 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def compute_trends(kpi_df: pd.DataFrame) -> pd.DataFrame:
-    """Add month-over-month percentage changes for numeric KPI columns."""
+    """Add month-over-month percentage changes and computed rates."""
     if kpi_df.empty:
         return kpi_df
 
     result = kpi_df.copy()
-    numeric_cols = result.select_dtypes(include="number").columns
 
+    # Compute inadimplência rate: non-performing / total credit rights
+    if "DC_PERFORMAR" in result.columns and "DC_NAO_PERFORMAR" in result.columns:
+        total_dc = result["DC_PERFORMAR"] + result["DC_NAO_PERFORMAR"]
+        result["TAXA_INADIMPLENCIA"] = (
+            result["DC_NAO_PERFORMAR"] / total_dc.replace(0, pd.NA) * 100
+        )
+
+    # MoM percentage changes
+    numeric_cols = result.select_dtypes(include="number").columns
     for col in numeric_cols:
+        if col == "TAXA_INADIMPLENCIA":
+            continue  # Skip rate columns for MoM (already a %)
         pct_col = f"{col}_MoM_%"
         result[pct_col] = result[col].pct_change() * 100
 

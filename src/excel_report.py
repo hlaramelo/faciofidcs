@@ -5,6 +5,8 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import AreaChart, BarChart, LineChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.series import DataPoint
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side, numbers
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -37,6 +39,7 @@ KPI_DISPLAY_NAMES = {
     "INADIMPLENCIA_VL": "Inadimplencia - Valor (R$)",
     "INADIMPLENCIA_PROVISAO": "Provisao para Perdas (R$)",
     "SUBSTITUICAO": "Substituicao de DC (R$)",
+    "TAXA_INADIMPLENCIA": "Taxa de Inadimplencia (%)",
 }
 
 
@@ -95,6 +98,9 @@ def write_dashboard(wb: Workbook, kpi_df: pd.DataFrame, fund_name: str):
         ws["A3"] = "Nenhum dado disponivel. Verifique a conexao com o portal CVM."
         return
 
+    # Freeze below title
+    ws.freeze_panes = "A5"
+
     # Latest date
     latest_date = kpi_df["DT_COMPTC"].max()
     ws["A3"] = f"Dados ate: {latest_date.strftime('%B/%Y') if pd.notna(latest_date) else 'N/A'}"
@@ -128,8 +134,11 @@ def write_dashboard(wb: Workbook, kpi_df: pd.DataFrame, fund_name: str):
         ws.cell(row=row, column=1).font = Font(name="Calibri", bold=True)
 
         value_cell = ws.cell(row=row, column=2, value=val)
-        if "NR_" in col.upper() or "QT_" in col.upper() or "COTIST" in col.upper():
+        col_upper = col.upper()
+        if "NR_" in col_upper or "QT_" in col_upper or "COTIST" in col_upper:
             value_cell.number_format = INTEGER_FORMAT
+        elif "TAXA" in col_upper or "RENTAB" in col_upper:
+            value_cell.number_format = '0.00"%"'
         else:
             value_cell.number_format = BRL_FORMAT
         value_cell.border = THIN_BORDER
@@ -211,42 +220,24 @@ def write_time_series_sheet(
         return
 
     # Create chart
-    if chart_type == "area":
-        chart = AreaChart()
-        chart.style = 10
-    elif chart_type == "bar":
-        chart = BarChart()
-        chart.style = 10
-        chart.grouping = "stacked"
-    else:
-        chart = LineChart()
-        chart.style = 10
-
-    chart.title = chart_title
-    chart.x_axis.title = "Mes"
-    # Use appropriate Y-axis label based on data type
-    if any(kw in chart_title.upper() for kw in ["RENTAB", "%", "TAXA"]):
-        chart.y_axis.title = "%"
-    else:
-        chart.y_axis.title = "Valor (R$)"
-    chart.width = 25
-    chart.height = 15
+    chart = _create_styled_chart(chart_type, chart_title)
 
     # Categories (dates)
     cats = Reference(ws, min_col=1, min_row=2, max_row=1 + num_data_rows)
     chart.set_categories(cats)
 
     # Data series
-    colors = ["2F5496", "ED7D31", "70AD47", "FFC000"]
     for i, col_idx in enumerate(range(2, len(display_cols) + 1)):
         data = Reference(ws, min_col=col_idx, min_row=1, max_row=1 + num_data_rows)
         chart.add_data(data, titles_from_data=True)
-        if i < len(colors):
-            chart.series[i].graphicalProperties.solidFill = colors[i]
+    _style_chart_series(chart)
 
-    # Place chart below data
-    chart_row = num_data_rows + 4
-    ws.add_chart(chart, f"A{chart_row}")
+    # Place chart to the right of data
+    chart_col = get_column_letter(len(display_cols) + 2)
+    ws.add_chart(chart, f"{chart_col}1")
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
 
 
 def write_per_class_sheet(
@@ -302,35 +293,70 @@ def write_per_class_sheet(
         return
 
     # Create chart
-    if chart_type == "area":
-        chart = AreaChart()
-        chart.style = 10
-    elif chart_type == "bar":
-        chart = BarChart()
-        chart.style = 10
-        chart.grouping = "stacked"
-    else:
-        chart = LineChart()
-        chart.style = 10
-
-    chart.title = chart_title
-    chart.x_axis.title = "Mes"
-    chart.y_axis.title = "Valor (R$)"
-    chart.width = 25
-    chart.height = 15
+    chart = _create_styled_chart(chart_type, chart_title)
 
     cats = Reference(ws, min_col=1, min_row=2, max_row=1 + num_data_rows)
     chart.set_categories(cats)
 
-    colors = ["2F5496", "ED7D31", "70AD47", "FFC000", "5B9BD5", "A5A5A5"]
     for i, col_idx in enumerate(range(2, len(display_cols) + 1)):
         data = Reference(ws, min_col=col_idx, min_row=1, max_row=1 + num_data_rows)
         chart.add_data(data, titles_from_data=True)
-        if i < len(colors):
-            chart.series[i].graphicalProperties.solidFill = colors[i]
+    _style_chart_series(chart)
 
-    chart_row = num_data_rows + 4
-    ws.add_chart(chart, f"A{chart_row}")
+    chart_col = get_column_letter(len(display_cols) + 2)
+    ws.add_chart(chart, f"{chart_col}1")
+
+    ws.freeze_panes = "A2"
+
+
+CHART_COLORS = ["2F5496", "ED7D31", "70AD47", "FFC000", "5B9BD5", "A5A5A5", "264478", "C55A11"]
+
+
+def _create_styled_chart(chart_type: str, title: str):
+    """Create a chart with consistent styling."""
+    if chart_type == "area":
+        chart = AreaChart()
+    elif chart_type == "bar":
+        chart = BarChart()
+        chart.grouping = "stacked"
+    else:
+        chart = LineChart()
+
+    chart.style = 10
+    chart.title = title
+    chart.x_axis.title = "Mes"
+
+    # Y-axis label based on data type
+    title_upper = title.upper()
+    if any(kw in title_upper for kw in ["RENTAB", "%", "TAXA", "INADIMP"]):
+        chart.y_axis.title = "%"
+        chart.y_axis.numFmt = '0.00"%"'
+    else:
+        chart.y_axis.title = "Valor (R$)"
+        chart.y_axis.numFmt = '#,##0'
+
+    chart.width = 30
+    chart.height = 16
+    chart.legend.position = "b"
+    chart.y_axis.crossAx = 100
+    chart.x_axis.tickLblPos = "low"
+
+    # Smooth lines for line charts
+    if chart_type == "line":
+        chart.style = 12
+
+    return chart
+
+
+def _style_chart_series(chart):
+    """Apply consistent colors and styling to chart series."""
+    for i, series in enumerate(chart.series):
+        if i < len(CHART_COLORS):
+            series.graphicalProperties.solidFill = CHART_COLORS[i]
+            # For line charts, also set line color
+            if hasattr(series, 'graphicalProperties') and hasattr(series.graphicalProperties, 'line'):
+                series.graphicalProperties.line.solidFill = CHART_COLORS[i]
+                series.graphicalProperties.line.width = 22000  # ~2pt
 
 
 def write_raw_data_sheet(wb: Workbook, tables: dict[str, pd.DataFrame]):
@@ -415,12 +441,26 @@ def generate_report(
             wb, kpi_df, "Credit Rights", dc_cols, "Direitos Creditorios", "bar"
         )
 
-    # Sheet 6: Inadimplência
-    inad_cols = [c for c in kpi_df.columns if "INADIMP" in c.upper() or "PROVIS" in c.upper() or "SUBSTIT" in c.upper()]
-    inad_cols = [c for c in inad_cols if not c.endswith("_MoM_%")]
-    if inad_cols:
+    # Sheet 6: Resgates e Aquisicoes
+    flow_cols = [c for c in kpi_df.columns if c in ("AQUISICOES", "RESGATES")]
+    if flow_cols:
         write_time_series_sheet(
-            wb, kpi_df, "Inadimplencia", inad_cols, "Inadimplencia e Provisoes", "bar"
+            wb, kpi_df, "Resgates e Aquisicoes", flow_cols, "Resgates e Aquisicoes", "bar"
+        )
+
+    # Sheet 7: Inadimplência (valores absolutos)
+    inad_val_cols = [c for c in kpi_df.columns
+                     if c in ("INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO", "DC_NAO_PERFORMAR", "SUBSTITUICAO")]
+    if inad_val_cols:
+        write_time_series_sheet(
+            wb, kpi_df, "Inadimplencia", inad_val_cols, "Inadimplencia - Valores Absolutos", "bar"
+        )
+
+    # Sheet 8: Taxa de Inadimplência (%)
+    if "TAXA_INADIMPLENCIA" in kpi_df.columns:
+        write_time_series_sheet(
+            wb, kpi_df, "Taxa Inadimplencia", ["TAXA_INADIMPLENCIA"],
+            "Taxa de Inadimplencia (%)", "line"
         )
 
     # Per-class sheets
