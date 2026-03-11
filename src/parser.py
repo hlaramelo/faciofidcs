@@ -112,6 +112,9 @@ def parse_all_tables(
         "tab_X_2",    # Table X.2 - quota details (senior)
         "tab_X_3",    # Table X.3 - quota details (mezanino)
         "tab_X_4",    # Table X.4 - quota details (subordinada)
+        "tab_X_5",    # Table X.5 - quota returns/rentabilidade
+        "tab_X_6",    # Table X.6 - additional quota info
+        "tab_X_7",    # Table X.7 - additional quota info
     ]
 
     tables = {}

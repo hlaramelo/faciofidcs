@@ -34,6 +34,9 @@ KPI_DISPLAY_NAMES = {
     "AQUISICOES": "Aquisicoes no Periodo (R$)",
     "RESGATES": "Resgates no Periodo (R$)",
     "RENTAB_MES": "Rentabilidade Mensal (%)",
+    "INADIMPLENCIA_VL": "Inadimplencia - Valor (R$)",
+    "INADIMPLENCIA_PROVISAO": "Provisao para Perdas (R$)",
+    "SUBSTITUICAO": "Substituicao de DC (R$)",
 }
 
 
@@ -307,7 +310,15 @@ def generate_report(
             wb, kpi_df, "Credit Rights", dc_cols, "Direitos Creditorios", "bar"
         )
 
-    # Sheet 5+: Raw Data
+    # Sheet 6: Inadimplência
+    inad_cols = [c for c in kpi_df.columns if "INADIMP" in c.upper() or "PROVIS" in c.upper() or "SUBSTIT" in c.upper()]
+    inad_cols = [c for c in inad_cols if not c.endswith("_MoM_%")]
+    if inad_cols:
+        write_time_series_sheet(
+            wb, kpi_df, "Inadimplencia", inad_cols, "Inadimplencia e Provisoes", "bar"
+        )
+
+    # Raw Data sheets
     write_raw_data_sheet(wb, tables)
 
     wb.save(output_path)

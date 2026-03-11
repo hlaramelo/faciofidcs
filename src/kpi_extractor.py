@@ -63,6 +63,23 @@ COLUMN_PATTERNS = {
         r"TAB_X_VL_RENTAB_MES",
         r"TAB_X.*RENTAB",
     ],
+    # Inadimplência / default (from tab_VI)
+    "INADIMPLENCIA_VL": [
+        r"TAB_VI.*VL.*INADIMP",
+        r"TAB_VI.*VL_CRED.*VENC",
+        r"TAB_VI.*ATRASO",
+        r"TAB_VI.*VL.*DEFAULT",
+    ],
+    "INADIMPLENCIA_PROVISAO": [
+        r"TAB_VI.*PROVIS",
+        r"TAB_VI.*PDD",
+        r"TAB_VI.*PERDA",
+    ],
+    # Substitution of credit rights (from tab_VII)
+    "SUBSTITUICAO": [
+        r"TAB_VII.*SUBSTIT",
+        r"TAB_VII.*VL.*SUBSTIT",
+    ],
 }
 
 
@@ -116,11 +133,14 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
             if matches:
                 col = matches[0]
                 if kpi_name not in all_columns_found:
+                    # Check if values are actually populated (not all NaN)
+                    values = pd.to_numeric(df[col], errors="coerce")
+                    if values.isna().all():
+                        continue  # Skip this table, try next one
+
                     all_columns_found[kpi_name] = (table_name, col)
                     if table_name == "tab_I":
-                        kpi_data[kpi_name] = pd.to_numeric(
-                            tab_i[col], errors="coerce"
-                        )
+                        kpi_data[kpi_name] = values
                     else:
                         # Prepare for merge from external table
                         merge_cols = ["DT_COMPTC"]
