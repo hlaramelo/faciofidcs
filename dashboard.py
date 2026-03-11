@@ -395,7 +395,7 @@ with tab_overview:
                 perf_metrics, "DT_COMPTC", ["PL"],
                 "Patrimonio Liquido", y_format="brl",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_pl")
 
     with col_right:
         if "Taxa_Inadimplencia_%" in credit_quality.columns:
@@ -404,7 +404,7 @@ with tab_overview:
                 "Taxa de Inadimplencia", y_format="pct",
                 colors=[COLORS["danger"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_inadimplencia")
 
     # Subordination + Quota in second row
     col_left2, col_right2 = st.columns(2)
@@ -418,7 +418,7 @@ with tab_overview:
                     "Razao de Subordinacao", y_format="pct",
                     colors=[COLORS["primary"], COLORS["warning"]],
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="overview_subordinacao")
 
     with col_right2:
         cota_df = per_class.get("cota_por_classe")
@@ -429,7 +429,7 @@ with tab_overview:
                 "Valor da Cota por Classe", y_format="brl",
                 colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_cota")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -464,7 +464,7 @@ with tab_credit:
                 "Evolucao da Taxa de Inadimplencia", y_format="pct",
                 colors=[COLORS["danger"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="credit_inadimplencia")
 
     with col2:
         # Performing vs Non-performing
@@ -476,7 +476,7 @@ with tab_credit:
                 colors=[COLORS["success"], COLORS["danger"]],
                 barmode="stack",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="credit_performar")
 
     col3, col4 = st.columns(2)
 
@@ -488,7 +488,7 @@ with tab_credit:
                 "Cobertura de Provisao (%)", y_format="pct",
                 colors=[COLORS["info"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="credit_cobertura")
 
     with col4:
         # MoM change in default rate
@@ -498,7 +498,7 @@ with tab_credit:
                 "Variacao Mensal Inadimplencia (pp)", y_format="pct",
                 colors=[COLORS["warning"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="credit_mom")
 
     # Data table
     with st.expander("Dados detalhados - Qualidade de Credito"):
@@ -542,7 +542,7 @@ with tab_subordination:
                     "Evolucao da Razao de Subordinacao", y_format="pct",
                     colors=[COLORS["primary"], COLORS["warning"]],
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="sub_ratio")
 
         with col2:
             # PL composition over time (stacked area)
@@ -553,7 +553,7 @@ with tab_subordination:
                     "Composicao do PL por Classe", y_format="brl",
                     colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="sub_pl_classe")
 
         # PL share pie chart (latest month)
         share_cols = [c for c in sub_ratios.columns if c.endswith("_%") and "Subordinacao" not in c]
@@ -574,7 +574,7 @@ with tab_subordination:
                     title=f"Composicao PL — {date_label}",
                     showlegend=False,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="sub_pie")
 
             with col_table:
                 with st.expander("Dados detalhados - Subordinacao", expanded=True):
@@ -616,7 +616,7 @@ with tab_performance:
                 "Evolucao do Patrimonio Liquido", y_format="brl",
                 colors=[COLORS["primary"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="perf_pl")
 
     with col2:
         if "Rentabilidade_%" in perf_metrics.columns:
@@ -625,7 +625,7 @@ with tab_performance:
                 "Rentabilidade Mensal", y_format="pct",
                 colors=[COLORS["success"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="perf_rentab")
 
     col3, col4 = st.columns(2)
 
@@ -639,7 +639,7 @@ with tab_performance:
                 "Valor da Cota por Classe", y_format="brl",
                 colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="perf_cota")
 
     with col4:
         if "Nr_Cotistas" in perf_metrics.columns:
@@ -647,7 +647,7 @@ with tab_performance:
                 perf_metrics, "DT_COMPTC", ["Nr_Cotistas"],
                 "Numero de Cotistas", colors=[COLORS["info"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="perf_cotistas")
 
     with st.expander("Dados detalhados - Performance"):
         display_perf = perf_metrics.copy()
@@ -686,7 +686,7 @@ with tab_flow:
                 "Aquisicoes vs Resgates", y_format="brl",
                 colors=[COLORS["success"], COLORS["danger"]],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="flow_aquisicoes")
 
     with col2:
         if "Fluxo_Liquido" in flow_metrics.columns:
@@ -700,7 +700,7 @@ with tab_flow:
             fig.update_layout(**CHART_LAYOUT, title="Fluxo Liquido Mensal")
             fig.update_yaxes(tickformat=",.0f", tickprefix="R$ ")
             fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="flow_liquido")
 
     if "Substituicoes" in flow_metrics.columns:
         fig = styled_bar_chart(
@@ -708,7 +708,7 @@ with tab_flow:
             "Substituicoes de Direitos Creditorios", y_format="brl",
             colors=[COLORS["warning"]],
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="flow_substituicoes")
 
     with st.expander("Dados detalhados - Fluxo"):
         display_flow = flow_metrics.copy()
