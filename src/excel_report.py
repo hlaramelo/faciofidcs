@@ -33,6 +33,7 @@ KPI_DISPLAY_NAMES = {
     "DC_NAO_PERFORMAR": "Direitos Creditorios - Nao Performar (R$)",
     "AQUISICOES": "Aquisicoes no Periodo (R$)",
     "RESGATES": "Resgates no Periodo (R$)",
+    "RENTAB_MES": "Rentabilidade Mensal (%)",
 }
 
 
@@ -106,7 +107,7 @@ def write_dashboard(wb: Workbook, kpi_df: pd.DataFrame, fund_name: str):
     numeric_cols = [
         c
         for c in kpi_df.columns
-        if c not in ["DT_COMPTC", "CNPJ_FUNDO", "DENOM_SOCIAL", "CLASSE", "CNPJ_CLASSE"]
+        if c not in ["DT_COMPTC", "CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "DENOM_SOCIAL", "CLASSE", "CNPJ_CLASSE"]
         and not c.endswith("_MoM_%")
     ]
 
@@ -290,7 +291,15 @@ def generate_report(
             wb, kpi_df, "Quota Values", cota_cols, "Valor da Cota por Classe", "line"
         )
 
-    # Sheet 4: Credit Rights
+    # Sheet 4: Monthly Returns
+    rentab_cols = [c for c in kpi_df.columns if "RENTAB" in c.upper()]
+    rentab_cols = [c for c in rentab_cols if not c.endswith("_MoM_%")]
+    if rentab_cols:
+        write_time_series_sheet(
+            wb, kpi_df, "Rentabilidade", rentab_cols, "Rentabilidade Mensal (%)", "line"
+        )
+
+    # Sheet 5: Credit Rights
     dc_cols = [c for c in kpi_df.columns if "DC_" in c.upper() or "PERFORM" in c.upper()]
     dc_cols = [c for c in dc_cols if not c.endswith("_MoM_%")]
     if dc_cols:

@@ -8,6 +8,8 @@ import pandas as pd
 # Column mapping: CVM column name patterns -> human-readable KPI names
 # These patterns match the TAB_* prefixed columns from CVM CSVs.
 # The parser auto-discovers columns, so we use flexible matching.
+# Note: CVM updated column names in Oct 2024 (CNPJ_FUNDO -> CNPJ_FUNDO_CLASSE)
+# and added new columns in Nov 2023 (TAB_I2C5_VL_COTA_FIF, CLASSE, etc.)
 COLUMN_PATTERNS = {
     # Table I - Fund summary
     "PL": [
@@ -15,30 +17,37 @@ COLUMN_PATTERNS = {
         r"TAB_I2.*PATRIM",
         r"TAB_I2.*PL",
         r"TAB_IV.*PATRIM",
+        r"TAB_IV.*VL_PL",
     ],
     "ATIVO_TOTAL": [
         r"VL_ATIVO",
         r"TAB_I1.*ATIVO.*TOTAL",
         r"TAB_I1.*VL_TOTAL",
+        r"TAB_I1.*VL_ATIVO",
     ],
     "VALOR_COTA": [
+        r"TAB_I2C5_VL_COTA",       # New column added Nov 2023
         r"VL_COTA",
         r"TAB_I2.*VL_COTA",
-        r"TAB_X.*VL_COTA",
+        r"TAB_X_VL_COTA",
+        r"TAB_X.*VL_COTA\b",
     ],
     "NR_COTISTAS": [
         r"NR_COTST",
         r"TAB_X.*NR_COTST",
         r"TAB_X.*QT_COTIST",
+        r"TAB_X_1.*NR_COTST",
     ],
     # Credit rights
     "DC_PERFORMAR": [
         r"TAB_II.*PERFORM",
         r"TAB_V.*PERFORM",
+        r"TAB_II.*VL_CART.*PERFORM",
     ],
     "DC_NAO_PERFORMAR": [
         r"TAB_II.*NAO.*PERFORM",
         r"TAB_VI.*INADIMP",
+        r"TAB_II.*VL_CART.*NAO.*PERFORM",
     ],
     # Acquisitions and redemptions
     "AQUISICOES": [
@@ -48,6 +57,11 @@ COLUMN_PATTERNS = {
     "RESGATES": [
         r"RESG",
         r"TAB_X.*RESG",
+    ],
+    # Monthly return (from tab_X)
+    "RENTAB_MES": [
+        r"TAB_X_VL_RENTAB_MES",
+        r"TAB_X.*RENTAB",
     ],
 }
 
@@ -86,7 +100,7 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     kpi_data = {"DT_COMPTC": tab_i["DT_COMPTC"]}
 
     # Add fund identification columns
-    for col in ["CNPJ_FUNDO", "DENOM_SOCIAL", "CLASSE", "CNPJ_CLASSE"]:
+    for col in ["CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "DENOM_SOCIAL", "CLASSE", "CNPJ_CLASSE"]:
         if col in tab_i.columns:
             kpi_data[col] = tab_i[col]
 
@@ -110,8 +124,10 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
                     else:
                         # Prepare for merge from external table
                         merge_cols = ["DT_COMPTC"]
-                        if "CNPJ_FUNDO" in df.columns:
-                            merge_cols.append("CNPJ_FUNDO")
+                        for cnpj_col in ["CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE"]:
+                            if cnpj_col in df.columns and cnpj_col in kpi_data:
+                                merge_cols.append(cnpj_col)
+                                break
                         subset = df[merge_cols + [col]].copy()
                         subset = subset.rename(columns={col: kpi_name})
                         subset[kpi_name] = pd.to_numeric(

@@ -26,7 +26,7 @@ def filter_by_cnpj(df: pd.DataFrame, cnpjs: list[str]) -> pd.DataFrame:
         return df
 
     cnpj_col = None
-    for col in ["CNPJ_FUNDO", "CNPJ_CLASSE"]:
+    for col in ["CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "CNPJ_CLASSE"]:
         if col in df.columns:
             cnpj_col = col
             break
@@ -77,7 +77,7 @@ def parse_table(
         result = result.sort_values("DT_COMPTC").reset_index(drop=True)
 
     # Drop exact duplicates (same fund, same date)
-    id_cols = [c for c in ["CNPJ_FUNDO", "DT_COMPTC", "CLASSE"] if c in result.columns]
+    id_cols = [c for c in ["CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "DT_COMPTC", "CLASSE"] if c in result.columns]
     if id_cols:
         result = result.drop_duplicates(subset=id_cols, keep="last")
 
