@@ -235,6 +235,28 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
     return result
 
 
+def _normalize_class_name(raw_name: str) -> str:
+    """Normalize subclass names to top-level groups.
+
+    Examples:
+        'Subclasse Senior Série 3' -> 'Senior'
+        'Subclasse Subordinada Mezanino 1 |' -> 'Mezanino'
+        'SENIOR' -> 'Senior'
+        'Classe Subordinada' -> 'Subordinada'
+    """
+    name = str(raw_name).strip().upper()
+    # Order matters: check Mezanino before Subordinada since
+    # "Subordinada Mezanino" should map to Mezanino
+    if "MEZANINO" in name or "MEZZANIN" in name:
+        return "Mezanino"
+    if "SENIOR" in name or "SÊNIOR" in name or "SENIO" in name:
+        return "Senior"
+    if "SUBORDINAD" in name or "JUNIOR" in name or "JÚNIOR" in name:
+        return "Subordinada"
+    # Fallback: return cleaned original
+    return raw_name.strip().title()
+
+
 def _pivot_by_class(
     tables: dict[str, pd.DataFrame],
     table_priority: list[str],
@@ -303,11 +325,14 @@ def _pivot_by_class(
         if pivot_df.empty:
             continue
 
+        # Normalize class names to top-level groups (Senior, Mezanino, Subordinada)
+        pivot_df["_classe_grupo"] = pivot_df[class_col].apply(_normalize_class_name)
+
         pivoted = pivot_df.pivot_table(
             index="DT_COMPTC",
-            columns=class_col,
+            columns="_classe_grupo",
             values=value_col,
-            aggfunc="first",
+            aggfunc="mean",  # Average if multiple subclasses in same group/month
         )
 
         if pivoted.empty or pivoted.columns.empty:

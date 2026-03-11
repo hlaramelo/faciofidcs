@@ -340,6 +340,11 @@ def _create_styled_chart(chart_type: str, title: str):
     chart.legend.position = "b"
     chart.y_axis.crossAx = 100
     chart.x_axis.tickLblPos = "low"
+    chart.x_axis.delete = False
+    chart.x_axis.txPr = None  # Reset any text properties
+    chart.x_axis.numFmt = "General"
+    chart.x_axis.majorTickMark = "out"
+    chart.x_axis.tickLblSkip = 1  # Show every label
 
     # Smooth lines for line charts
     if chart_type == "line":
