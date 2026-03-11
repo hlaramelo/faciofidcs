@@ -12,13 +12,13 @@ OUTPUT_DIR = BASE_DIR / "output"
 CVM_BASE_URL = "https://dados.cvm.gov.br/dados/FIDC/DOC/INF_MENSAL/DADOS"
 CVM_ZIP_PATTERN = "inf_mensal_fidc_{year}{month:02d}.zip"
 
-# Funds to monitor (add new Facio FIDCs here)
+# Funds to monitor (ordered by PL descending)
 FUNDS = [
     {
-        "name": "Facio FIDC Financeiros RL",
-        "cnpj": "51.119.641/0001-09",
-        "cnpj_raw": "51119641000109",
-        "status": "Em Liquidacao",
+        "name": "Facio 4 FIDC Financeiros RL",
+        "cnpj": "62.627.291/0001-08",
+        "cnpj_raw": "62627291000108",
+        "status": "Operacional",
     },
     {
         "name": "Facio 3 FIDC RL",
@@ -27,10 +27,10 @@ FUNDS = [
         "status": "Operacional",
     },
     {
-        "name": "Facio 4 FIDC Financeiros RL",
-        "cnpj": "62.627.291/0001-08",
-        "cnpj_raw": "62627291000108",
-        "status": "Operacional",
+        "name": "Facio FIDC Financeiros RL",
+        "cnpj": "51.119.641/0001-09",
+        "cnpj_raw": "51119641000109",
+        "status": "Em Liquidacao",
     },
 ]
 
