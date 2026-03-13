@@ -276,7 +276,7 @@ with st.sidebar:
     with col_s2:
         end_month = st.date_input(
             "Ate",
-            value=today.replace(day=1),
+            value=today,
             format="YYYY-MM-DD",
         )
 
