@@ -37,6 +37,9 @@ FUNDS = [
     },
 ]
 
+# Default date range
+DEFAULT_MONTHS_BACK = 12
+
 # Download settings
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
