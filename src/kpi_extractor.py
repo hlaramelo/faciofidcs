@@ -113,6 +113,17 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     if tab_i.empty:
         return pd.DataFrame()
 
+    # Check if tab_I has multiple rows per date (one per class)
+    has_classes = False
+    class_col_for_info = None
+    for cc in ["CLASSE", "DENOM_SOCIAL"]:
+        if cc in tab_i.columns:
+            unique_per_date = tab_i.groupby("DT_COMPTC")[cc].nunique()
+            if (unique_per_date > 1).any():
+                has_classes = True
+                class_col_for_info = cc
+                break
+
     # Build KPI DataFrame
     kpi_data = {"DT_COMPTC": tab_i["DT_COMPTC"]}
 
@@ -164,8 +175,33 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if available_merge_cols:
             kpi_df = kpi_df.merge(subset, on=available_merge_cols, how="left")
 
-    # Collect columns already mapped by KPI patterns to avoid duplicates
-    mapped_source_cols = {col for _, (_, col) in all_columns_found.items()}
+    # If tab_I has multiple rows per date (per class), aggregate to fund level
+    # for the KPI summary (per-class data is handled by extract_per_class_data)
+    if has_classes and "DT_COMPTC" in kpi_df.columns:
+        print(f"  Multi-class data detected via '{class_col_for_info}', aggregating to fund level...")
+        numeric_cols = kpi_df.select_dtypes(include="number").columns.tolist()
+        # For PL and totals, sum across classes; for rates/cota, take mean
+        sum_cols = [c for c in numeric_cols if c in (
+            "PL", "ATIVO_TOTAL", "DC_PERFORMAR", "DC_NAO_PERFORMAR",
+            "AQUISICOES", "RESGATES", "INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO",
+            "SUBSTITUICAO", "NR_COTISTAS",
+        )]
+        mean_cols = [c for c in numeric_cols if c in (
+            "VALOR_COTA", "RENTAB_MES",
+        )]
+
+        agg_dict = {}
+        for c in sum_cols:
+            agg_dict[c] = "sum"
+        for c in mean_cols:
+            agg_dict[c] = "mean"
+        # Any remaining numeric columns default to first
+        for c in numeric_cols:
+            if c not in agg_dict:
+                agg_dict[c] = "first"
+
+        if agg_dict:
+            kpi_df = kpi_df.groupby("DT_COMPTC", as_index=False).agg(agg_dict)
 
     # Print discovered mappings
     print("\n  KPI column mappings discovered:")
@@ -221,12 +257,12 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
         result["pl_por_classe"] = pl_class_df
 
     # --- Valor da Cota por Classe ---
-    # Try tab_X_2/3/4 (quota details per class type), then tab_I
+    # Try tab_I first (has all classes with CLASSE column), then tab_X_2/3/4
     cota_class_df = _pivot_by_class(
         tables,
-        table_priority=["tab_X_2", "tab_X_3", "tab_X_4", "tab_I"],
-        value_patterns=[r"TAB_X_VL_COTA", r"TAB_X.*VL_COTA\b",
-                        r"TAB_I2C5_VL_COTA", r"VL_COTA"],
+        table_priority=["tab_I", "tab_X_2", "tab_X_3", "tab_X_4"],
+        value_patterns=[r"TAB_I2C5_VL_COTA", r"VL_COTA",
+                        r"TAB_X_VL_COTA", r"TAB_X.*VL_COTA\b"],
         label="Cota",
     )
     if cota_class_df is not None:
@@ -271,7 +307,7 @@ def _pivot_by_class(
     # Possible class identifier columns
     class_col_candidates = [
         "CLASSE", "TAB_X_CLASSE_SERIE", "CLASSE_SERIE",
-        "TP_CLASSE", "DS_CLASSE",
+        "TP_CLASSE", "DS_CLASSE", "DENOM_SOCIAL",
     ]
 
     for table_name in table_priority:
