@@ -398,7 +398,16 @@ with tab_overview:
     col_left, col_right = st.columns(2)
 
     with col_left:
-        if "PL" in perf_metrics.columns:
+        pl_df = per_class.get("pl_por_classe")
+        if pl_df is not None and not pl_df.empty:
+            pl_cols = [c for c in pl_df.columns if c != "DT_COMPTC"]
+            fig = styled_line_chart(
+                pl_df, "DT_COMPTC", pl_cols,
+                "Patrimonio Liquido por Classe", y_format="brl",
+                colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+            )
+            st.plotly_chart(fig, use_container_width=True, key="overview_pl")
+        elif "PL" in perf_metrics.columns:
             fig = styled_line_chart(
                 perf_metrics, "DT_COMPTC", ["PL"],
                 "Patrimonio Liquido", y_format="brl",
@@ -653,7 +662,16 @@ with tab_performance:
     col1, col2 = st.columns(2)
 
     with col1:
-        if "PL" in perf_metrics.columns:
+        pl_df = per_class.get("pl_por_classe")
+        if pl_df is not None and not pl_df.empty:
+            pl_cols = [c for c in pl_df.columns if c != "DT_COMPTC"]
+            fig = styled_line_chart(
+                pl_df, "DT_COMPTC", pl_cols,
+                "Evolucao do Patrimonio Liquido por Classe", y_format="brl",
+                colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+            )
+            st.plotly_chart(fig, use_container_width=True, key="perf_pl")
+        elif "PL" in perf_metrics.columns:
             fig = styled_area_chart(
                 perf_metrics, "DT_COMPTC", ["PL"],
                 "Evolucao do Patrimonio Liquido", y_format="brl",
