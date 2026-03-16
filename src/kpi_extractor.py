@@ -33,15 +33,11 @@ COLUMN_PATTERNS = {
         r"TAB_X.*VL_COTA\b",
     ],
     "NR_COTISTAS": [
-        r"NR_COTST",
-        r"TAB_X.*NR_COTST",
-        r"TAB_X.*QT_COTIST",
-        r"TAB_X_1.*NR_COTST",
-        r"NR_COTISTAS",
-        r"QT_COTST",
-        r"QT_COTISTAS",
-        r"TAB_I.*NR_COTST",
-        r"TAB_I.*COTIST",
+        # Handled specially in extract_kpis — sum all NR_COTST breakdown columns
+        # These patterns are fallbacks if the special handling doesn't find data
+        r"NR_COTST_TOTAL",
+        r"NR_COTISTAS_TOTAL",
+        r"QT_COTST_TOTAL",
     ],
     # Credit rights
     "DC_PERFORMAR": [
@@ -147,10 +143,10 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     # Build KPI DataFrame
     kpi_data = {"DT_COMPTC": tab_i["DT_COMPTC"]}
 
-    # Add fund identification columns
+    # Add fund identification columns (ensure CNPJ columns stay as strings)
     for col in ["CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "DENOM_SOCIAL", "CLASSE", "CNPJ_CLASSE"]:
         if col in tab_i.columns:
-            kpi_data[col] = tab_i[col]
+            kpi_data[col] = tab_i[col].astype(str) if "CNPJ" in col else tab_i[col]
 
     # Auto-discover KPI columns from all tables
     all_columns_found = {}
@@ -223,6 +219,26 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if agg_dict:
             kpi_df = kpi_df.groupby("DT_COMPTC", as_index=False).agg(agg_dict)
 
+    # Special handling: compute NR_COTISTAS by summing all cotistas breakdown columns
+    # from tab_X_1 if not already found or if only a partial column was matched
+    if "NR_COTISTAS" not in kpi_df.columns or kpi_df["NR_COTISTAS"].isna().all():
+        tab_x1 = tables.get("tab_X_1")
+        if tab_x1 is not None and "DT_COMPTC" in tab_x1.columns:
+            cotst_cols = [c for c in tab_x1.columns if re.search(r"NR_COTST", c, re.IGNORECASE)]
+            if cotst_cols:
+                # Sum all NR_COTST breakdown columns (PF, PJ, etc.) per date
+                tab_x1_numeric = tab_x1[["DT_COMPTC"]].copy()
+                for c in cotst_cols:
+                    tab_x1_numeric[c] = pd.to_numeric(tab_x1[c], errors="coerce")
+                nr_total = tab_x1_numeric.groupby("DT_COMPTC")[cotst_cols].sum().sum(axis=1).reset_index()
+                nr_total.columns = ["DT_COMPTC", "NR_COTISTAS"]
+                # Merge into kpi_df
+                if "NR_COTISTAS" in kpi_df.columns:
+                    kpi_df = kpi_df.drop(columns=["NR_COTISTAS"])
+                kpi_df = kpi_df.merge(nr_total, on="DT_COMPTC", how="left")
+                all_columns_found["NR_COTISTAS"] = ("tab_X_1", f"SUM({len(cotst_cols)} cols)")
+                print(f"  NR_COTISTAS: computed by summing {len(cotst_cols)} breakdown columns from tab_X_1")
+
     # Print discovered mappings
     print("\n  KPI column mappings discovered:")
     for kpi_name, (table_name, col) in all_columns_found.items():
@@ -251,7 +267,7 @@ def compute_trends(kpi_df: pd.DataFrame) -> pd.DataFrame:
         if col == "TAXA_INADIMPLENCIA":
             continue  # Skip rate columns for MoM (already a %)
         pct_col = f"{col}_MoM_%"
-        result[pct_col] = result[col].pct_change() * 100
+        result[pct_col] = result[col].pct_change(fill_method=None) * 100
 
     return result
 

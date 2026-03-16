@@ -140,7 +140,7 @@ def compute_performance_metrics(
     # PL
     if "PL" in kpi_df.columns:
         result["PL"] = kpi_df["PL"]
-        result["PL_MoM_%"] = kpi_df["PL"].pct_change() * 100
+        result["PL_MoM_%"] = kpi_df["PL"].pct_change(fill_method=None) * 100
 
     # Total assets
     if "ATIVO_TOTAL" in kpi_df.columns:
@@ -153,7 +153,7 @@ def compute_performance_metrics(
     # Quota value
     if "VALOR_COTA" in kpi_df.columns:
         result["Valor_Cota"] = kpi_df["VALOR_COTA"]
-        result["Cota_MoM_%"] = kpi_df["VALOR_COTA"].pct_change() * 100
+        result["Cota_MoM_%"] = kpi_df["VALOR_COTA"].pct_change(fill_method=None) * 100
 
     # Number of quotaholders
     if "NR_COTISTAS" in kpi_df.columns:
