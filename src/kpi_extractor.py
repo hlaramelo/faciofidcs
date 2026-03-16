@@ -318,7 +318,7 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
     return result
 
 
-def _normalize_class_name(raw_name: str) -> str:
+def _normalize_class_name(raw_name) -> str:
     """Normalize subclass names to top-level groups.
 
     Examples:
@@ -328,6 +328,9 @@ def _normalize_class_name(raw_name: str) -> str:
         'Classe Subordinada' -> 'Subordinada'
         'Facio 3 FIDC RL - Subclasse Senior Serie 1' -> 'Senior'
     """
+    import pandas as pd
+    if raw_name is None or (isinstance(raw_name, float) and pd.isna(raw_name)):
+        return "Desconhecida"
     name = str(raw_name).strip().upper()
     # Order matters: check Mezanino before Subordinada since
     # "Subordinada Mezanino" should map to Mezanino
@@ -404,7 +407,7 @@ def _pivot_by_class(
         # Pivot: rows=date, columns=class, values=numeric value
         pivot_df = df[["DT_COMPTC", class_col, value_col]].copy()
         pivot_df[value_col] = pd.to_numeric(pivot_df[value_col], errors="coerce")
-        pivot_df = pivot_df.dropna(subset=[value_col])
+        pivot_df = pivot_df.dropna(subset=[value_col, class_col])
 
         if pivot_df.empty:
             continue
