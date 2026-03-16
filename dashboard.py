@@ -16,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import DATA_DIR, FUNDS
 from src.analytics import (
+    compute_cdi_spread,
     compute_credit_quality_metrics,
+    compute_data_quality,
     compute_flow_metrics,
     compute_performance_metrics,
     compute_subordination_ratios,
@@ -271,16 +273,47 @@ with st.sidebar:
         start_month = st.date_input(
             "De",
             value=fund_start,
+            min_value=fund_start,
+            max_value=today,
             format="YYYY-MM-DD",
         )
     with col_s2:
         end_month = st.date_input(
             "Ate",
             value=today,
+            min_value=fund_start,
+            max_value=today,
             format="YYYY-MM-DD",
         )
 
+    # Validate date range
+    if start_month < fund_start:
+        st.warning(f"Inicio ajustado: fundo comecou em {fund_start.strftime('%m/%Y')}")
+        start_month = fund_start
+    if start_month > end_month:
+        st.error("Data inicial deve ser anterior a data final.")
+
     refresh = st.button("Atualizar Dados", type="primary", use_container_width=True)
+
+    # Configurable alert thresholds
+    st.markdown("---")
+    st.markdown("##### Limiares de Alerta")
+    with st.expander("Configurar", expanded=False):
+        thresh_inad_danger = st.number_input(
+            "Inadimplencia critica (%)", value=15.0, step=1.0, key="thresh_inad_d",
+        )
+        thresh_inad_warning = st.number_input(
+            "Inadimplencia alerta (%)", value=10.0, step=1.0, key="thresh_inad_w",
+        )
+        thresh_pl_danger = st.number_input(
+            "Queda PL critica (%)", value=10.0, step=1.0, key="thresh_pl_d",
+        )
+        thresh_sub_danger = st.number_input(
+            "Subordinacao minima critica (%)", value=10.0, step=1.0, key="thresh_sub_d",
+        )
+        thresh_sub_warning = st.number_input(
+            "Subordinacao minima alerta (%)", value=20.0, step=1.0, key="thresh_sub_w",
+        )
 
     st.markdown("---")
     st.markdown(
@@ -314,7 +347,20 @@ credit_quality = compute_credit_quality_metrics(kpi_df)
 flow_metrics = compute_flow_metrics(kpi_df)
 perf_metrics = compute_performance_metrics(kpi_df, per_class)
 sub_ratios = compute_subordination_ratios(per_class)
-alerts = get_alert_flags(kpi_df, per_class)
+spread_metrics = compute_cdi_spread(perf_metrics, cdi_df)
+data_quality = compute_data_quality(kpi_df, tables)
+
+# Pass custom thresholds to alert function
+alerts = get_alert_flags(
+    kpi_df, per_class,
+    thresholds={
+        "inad_danger": thresh_inad_danger,
+        "inad_warning": thresh_inad_warning,
+        "pl_danger": thresh_pl_danger,
+        "sub_danger": thresh_sub_danger,
+        "sub_warning": thresh_sub_warning,
+    },
+)
 
 latest = kpi_df.iloc[-1]
 prev = kpi_df.iloc[-2] if len(kpi_df) > 1 else None
@@ -322,10 +368,26 @@ prev = kpi_df.iloc[-2] if len(kpi_df) > 1 else None
 latest_date = kpi_df["DT_COMPTC"].max()
 date_label = latest_date.strftime("%b/%Y") if pd.notna(latest_date) else "N/A"
 
+# CDI fetch warning
+cdi_ok = cdi_df is not None and not cdi_df.empty and "CDI_%" in cdi_df.columns
+if not cdi_ok:
+    st.warning("Dados do CDI indisponiveis (API BCB falhou). Graficos de benchmark CDI estarao incompletos.")
+
 # ── Header ───────────────────────────────────────────────────────────────────
 
 st.markdown(f"## {fund_name}")
-st.markdown(f"Dados ate **{date_label}** · {len(kpi_df)} meses de historico")
+
+# Data quality indicator inline
+dq_pct = data_quality["completeness_pct"]
+dq_color = "#22c55e" if dq_pct >= 80 else "#f59e0b" if dq_pct >= 50 else "#ef4444"
+dq_label = f"<span style='color:{dq_color};font-weight:600'>{dq_pct:.0f}%</span>"
+st.markdown(
+    f"Dados ate **{date_label}** · {len(kpi_df)} meses de historico · "
+    f"Qualidade dos dados: {dq_label}",
+    unsafe_allow_html=True,
+)
+if data_quality["missing_kpis"]:
+    st.caption(f"KPIs indisponiveis: {', '.join(data_quality['missing_kpis'])}")
 
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
@@ -340,11 +402,12 @@ st.markdown("")
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab_overview, tab_credit, tab_subordination, tab_performance, tab_flow, tab_data = st.tabs([
+tab_overview, tab_credit, tab_subordination, tab_performance, tab_compare, tab_flow, tab_data = st.tabs([
     "Visao Geral",
     "Qualidade de Credito",
     "Subordinacao",
     "Performance",
+    "Comparacao Fundos",
     "Fluxo da Carteira",
     "Dados Brutos",
 ])
@@ -645,29 +708,104 @@ with tab_performance:
     st.markdown('<div class="section-header">Performance do Fundo</div>', unsafe_allow_html=True)
 
     perf_latest = perf_metrics.iloc[-1] if not perf_metrics.empty else {}
+    spread_latest = spread_metrics.iloc[-1] if not spread_metrics.empty else {}
 
-    # Summary cards
+    # Summary cards — Row 1: core metrics
     pc1, pc2, pc3, pc4 = st.columns(4)
     with pc1:
         st.metric("PL", format_brl(perf_latest.get("PL")))
     with pc2:
-        st.metric("Ativo Total", format_brl(perf_latest.get("Ativo_Total")))
-    with pc3:
         st.metric("Rentabilidade Mensal", format_pct(perf_latest.get("Rentabilidade_%")))
+    with pc3:
+        spread_val = spread_latest.get("Spread_bps")
+        spread_label = f"{spread_val:+.0f} bps" if pd.notna(spread_val) else "—"
+        st.metric("Spread vs CDI", spread_label)
     with pc4:
         st.metric("Valor da Cota", format_brl(perf_latest.get("Valor_Cota")))
+
+    # Row 2: cumulative returns
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    with rc1:
+        st.metric("Retorno YTD", format_pct(spread_latest.get("Retorno_YTD_%")))
+    with rc2:
+        st.metric("Retorno 3M", format_pct(spread_latest.get("Retorno_3M_%")))
+    with rc3:
+        st.metric("Retorno 6M", format_pct(spread_latest.get("Retorno_6M_%")))
+    with rc4:
+        st.metric("Retorno 12M", format_pct(spread_latest.get("Retorno_12M_%")))
 
     st.markdown("")
 
     col1, col2 = st.columns(2)
 
     with col1:
+        # Cumulative return: Fund vs CDI
+        if not spread_metrics.empty and "Acumulado_Fundo_%" in spread_metrics.columns:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=spread_metrics["DT_COMPTC"], y=spread_metrics["Acumulado_Fundo_%"],
+                name="Fundo (acum.)", mode="lines+markers",
+                line=dict(color=COLORS["success"], width=2.5),
+                marker=dict(size=5),
+            ))
+            if "Acumulado_CDI_%" in spread_metrics.columns:
+                fig.add_trace(go.Scatter(
+                    x=spread_metrics["DT_COMPTC"], y=spread_metrics["Acumulado_CDI_%"],
+                    name="CDI (acum.)", mode="lines+markers",
+                    line=dict(color=COLORS["warning"], width=2.5, dash="dot"),
+                    marker=dict(size=5),
+                ))
+            fig.update_layout(**CHART_LAYOUT, title="Retorno Acumulado: Fundo vs CDI")
+            fig.update_yaxes(ticksuffix="%")
+            fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+            st.plotly_chart(fig, use_container_width=True, key="perf_acumulado")
+
+    with col2:
+        # Monthly spread (bps)
+        if not spread_metrics.empty and "Spread_bps" in spread_metrics.columns:
+            sm = spread_metrics.copy()
+            sm["Color"] = sm["Spread_bps"].apply(
+                lambda x: COLORS["success"] if pd.notna(x) and x >= 0 else COLORS["danger"]
+            )
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=sm["DT_COMPTC"], y=sm["Spread_bps"],
+                marker_color=sm["Color"], name="Spread (bps)",
+            ))
+            fig.update_layout(**CHART_LAYOUT, title="Spread Mensal vs CDI (bps)")
+            fig.update_yaxes(ticksuffix=" bps")
+            fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+            st.plotly_chart(fig, use_container_width=True, key="perf_spread")
+
+    col3, col4 = st.columns(2)
+
+    with col3:
+        # Rentabilidade vs CDI benchmark (monthly)
+        if "Rentabilidade_%" in perf_metrics.columns:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=perf_metrics["DT_COMPTC"], y=perf_metrics["Rentabilidade_%"],
+                name="Fundo", marker_color=COLORS["success"], opacity=0.9,
+            ))
+            if cdi_ok and not spread_metrics.empty and "CDI_%" in spread_metrics.columns:
+                fig.add_trace(go.Scatter(
+                    x=spread_metrics["DT_COMPTC"], y=spread_metrics["CDI_%"],
+                    name="CDI", mode="lines+markers",
+                    line=dict(color=COLORS["warning"], width=2.5, dash="dot"),
+                    marker=dict(size=5),
+                ))
+            fig.update_layout(**CHART_LAYOUT, title="Rentabilidade Mensal vs CDI")
+            fig.update_yaxes(ticksuffix="%")
+            fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+            st.plotly_chart(fig, use_container_width=True, key="perf_rentab")
+
+    with col4:
         pl_df = per_class.get("pl_por_classe")
         if pl_df is not None and not pl_df.empty:
             pl_cols = [c for c in pl_df.columns if c != "DT_COMPTC"]
             fig = styled_line_chart(
                 pl_df, "DT_COMPTC", pl_cols,
-                "Evolucao do Patrimonio Liquido por Classe", y_format="brl",
+                "PL por Classe", y_format="brl",
                 colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
             )
             st.plotly_chart(fig, use_container_width=True, key="perf_pl")
@@ -679,33 +817,9 @@ with tab_performance:
             )
             st.plotly_chart(fig, use_container_width=True, key="perf_pl")
 
-    with col2:
-        # Rentabilidade vs CDI benchmark
-        if "Rentabilidade_%" in perf_metrics.columns:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=perf_metrics["DT_COMPTC"], y=perf_metrics["Rentabilidade_%"],
-                name="Fundo", marker_color=COLORS["success"], opacity=0.9,
-            ))
-            if cdi_df is not None and not cdi_df.empty:
-                merged_cdi = perf_metrics[["DT_COMPTC"]].merge(
-                    cdi_df, on="DT_COMPTC", how="left",
-                )
-                if "CDI_%" in merged_cdi.columns and merged_cdi["CDI_%"].notna().any():
-                    fig.add_trace(go.Scatter(
-                        x=merged_cdi["DT_COMPTC"], y=merged_cdi["CDI_%"],
-                        name="CDI", mode="lines+markers",
-                        line=dict(color=COLORS["warning"], width=2.5, dash="dot"),
-                        marker=dict(size=5),
-                    ))
-            fig.update_layout(**CHART_LAYOUT, title="Rentabilidade Mensal vs CDI")
-            fig.update_yaxes(ticksuffix="%")
-            fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
-            st.plotly_chart(fig, use_container_width=True, key="perf_rentab")
+    col5, col6 = st.columns(2)
 
-    col3, col4 = st.columns(2)
-
-    with col3:
+    with col5:
         # Quota value evolution per class
         cota_df = per_class.get("cota_por_classe")
         if cota_df is not None and not cota_df.empty:
@@ -722,7 +836,7 @@ with tab_performance:
                 )
                 st.plotly_chart(fig, use_container_width=True, key="perf_cota")
 
-    with col4:
+    with col6:
         if "Nr_Cotistas" in perf_metrics.columns:
             fig = styled_line_chart(
                 perf_metrics, "DT_COMPTC", ["Nr_Cotistas"],
@@ -730,14 +844,151 @@ with tab_performance:
             )
             st.plotly_chart(fig, use_container_width=True, key="perf_cotistas")
 
-    with st.expander("Dados detalhados - Performance"):
-        display_perf = perf_metrics.copy()
-        display_perf["DT_COMPTC"] = display_perf["DT_COMPTC"].dt.strftime("%Y-%m")
-        st.dataframe(display_perf, use_container_width=True, hide_index=True)
+    with st.expander("Dados detalhados - Performance & Spread"):
+        if not spread_metrics.empty:
+            display_spread = spread_metrics.copy()
+            display_spread["DT_COMPTC"] = display_spread["DT_COMPTC"].dt.strftime("%Y-%m")
+            st.dataframe(display_spread, use_container_width=True, hide_index=True)
+        else:
+            display_perf = perf_metrics.copy()
+            display_perf["DT_COMPTC"] = display_perf["DT_COMPTC"].dt.strftime("%Y-%m")
+            st.dataframe(display_perf, use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 5: PORTFOLIO FLOW
+# TAB 5: FUND COMPARISON
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_compare:
+    st.markdown('<div class="section-header">Comparacao entre Fundos Facio</div>', unsafe_allow_html=True)
+
+    # Load data for all funds in parallel
+    compare_funds = [f for f in FUNDS if f["name"] != fund_name and f["status"] == "Operacional"]
+
+    if not compare_funds:
+        st.info("Nenhum outro fundo operacional para comparar.")
+    else:
+        st.markdown("Comparando com o fundo selecionado na sidebar.")
+
+        @st.cache_data(ttl=3600, show_spinner=False)
+        def load_comparison_data(fund_cnpj_raw: str, s_str: str, e_str: str):
+            """Load KPIs for a comparison fund."""
+            from datetime import date as d
+            s_parts = s_str.split("-")
+            e_parts = e_str.split("-")
+            s_date = d(int(s_parts[0]), int(s_parts[1]), 1)
+            e_date = d(int(e_parts[0]), int(e_parts[1]), 1)
+            data_dirs = download_monthly_zips(s_date, e_date)
+            if not data_dirs:
+                return None
+            t = parse_all_tables(data_dirs, [fund_cnpj_raw])
+            if not t:
+                return None
+            kdf = extract_kpis(t)
+            if kdf.empty:
+                return None
+            return compute_trends(kdf)
+
+        all_fund_kpis = {fund_name: kpi_df}
+        with st.spinner("Carregando dados dos outros fundos..."):
+            for cf in compare_funds:
+                cf_start = max(start_str, cf["start_date"][:7])
+                cf_kpi = load_comparison_data(cf["cnpj_raw"], cf_start, end_str)
+                if cf_kpi is not None and not cf_kpi.empty:
+                    all_fund_kpis[cf["name"]] = cf_kpi
+
+        if len(all_fund_kpis) < 2:
+            st.warning("Dados insuficientes para comparacao no periodo selecionado.")
+        else:
+            # Comparison metrics table
+            comp_rows = []
+            for fname, fkpi in all_fund_kpis.items():
+                fl = fkpi.iloc[-1]
+                comp_rows.append({
+                    "Fundo": fname,
+                    "PL": format_brl(fl.get("PL")),
+                    "Inadimplencia (%)": format_pct(fl.get("TAXA_INADIMPLENCIA")),
+                    "Rentab. Mensal (%)": format_pct(fl.get("RENTAB_MES")),
+                    "Valor Cota": format_brl(fl.get("VALOR_COTA")),
+                    "Cotistas": int(fl.get("NR_COTISTAS")) if pd.notna(fl.get("NR_COTISTAS")) else "—",
+                })
+            st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+            st.markdown("")
+
+            # Comparison charts
+            comp_col1, comp_col2 = st.columns(2)
+
+            with comp_col1:
+                # PL comparison
+                fig = go.Figure()
+                palette = [COLORS["primary"], COLORS["success"], COLORS["warning"], COLORS["danger"]]
+                for i, (fname, fkpi) in enumerate(all_fund_kpis.items()):
+                    if "PL" in fkpi.columns:
+                        fig.add_trace(go.Scatter(
+                            x=fkpi["DT_COMPTC"], y=fkpi["PL"],
+                            name=fname, mode="lines+markers",
+                            line=dict(color=palette[i % len(palette)], width=2.5),
+                            marker=dict(size=5),
+                        ))
+                fig.update_layout(**CHART_LAYOUT, title="Patrimonio Liquido")
+                fig.update_yaxes(tickformat=",.0f", tickprefix="R$ ")
+                fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+                st.plotly_chart(fig, use_container_width=True, key="comp_pl")
+
+            with comp_col2:
+                # Default rate comparison
+                fig = go.Figure()
+                for i, (fname, fkpi) in enumerate(all_fund_kpis.items()):
+                    if "TAXA_INADIMPLENCIA" in fkpi.columns:
+                        fig.add_trace(go.Scatter(
+                            x=fkpi["DT_COMPTC"], y=fkpi["TAXA_INADIMPLENCIA"],
+                            name=fname, mode="lines+markers",
+                            line=dict(color=palette[i % len(palette)], width=2.5),
+                            marker=dict(size=5),
+                        ))
+                fig.update_layout(**CHART_LAYOUT, title="Taxa de Inadimplencia")
+                fig.update_yaxes(ticksuffix="%")
+                fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+                st.plotly_chart(fig, use_container_width=True, key="comp_inadimplencia")
+
+            comp_col3, comp_col4 = st.columns(2)
+
+            with comp_col3:
+                # Rentabilidade comparison
+                fig = go.Figure()
+                for i, (fname, fkpi) in enumerate(all_fund_kpis.items()):
+                    if "RENTAB_MES" in fkpi.columns:
+                        fig.add_trace(go.Scatter(
+                            x=fkpi["DT_COMPTC"], y=fkpi["RENTAB_MES"],
+                            name=fname, mode="lines+markers",
+                            line=dict(color=palette[i % len(palette)], width=2.5),
+                            marker=dict(size=5),
+                        ))
+                fig.update_layout(**CHART_LAYOUT, title="Rentabilidade Mensal (%)")
+                fig.update_yaxes(ticksuffix="%")
+                fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+                st.plotly_chart(fig, use_container_width=True, key="comp_rentab")
+
+            with comp_col4:
+                # Quota value comparison
+                fig = go.Figure()
+                for i, (fname, fkpi) in enumerate(all_fund_kpis.items()):
+                    if "VALOR_COTA" in fkpi.columns:
+                        fig.add_trace(go.Scatter(
+                            x=fkpi["DT_COMPTC"], y=fkpi["VALOR_COTA"],
+                            name=fname, mode="lines+markers",
+                            line=dict(color=palette[i % len(palette)], width=2.5),
+                            marker=dict(size=5),
+                        ))
+                fig.update_layout(**CHART_LAYOUT, title="Valor da Cota")
+                fig.update_yaxes(tickformat=",.2f", tickprefix="R$ ")
+                fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+                st.plotly_chart(fig, use_container_width=True, key="comp_cota")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6: PORTFOLIO FLOW
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_flow:
@@ -798,7 +1049,7 @@ with tab_flow:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 6: RAW DATA
+# TAB 7: RAW DATA
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_data:
@@ -849,5 +1100,36 @@ with st.sidebar:
             csv_export,
             file_name=f"{fund_name.lower().replace(' ', '_')}_kpis.csv",
             mime="text/csv",
+            use_container_width=True,
+        )
+
+        # Bulk export: all analytics in one file
+        import io
+        buf = io.BytesIO()
+        fn_safe = fund_name.lower().replace(" ", "_")
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            export_df.to_excel(writer, sheet_name="KPIs", index=False)
+            if not credit_quality.empty:
+                cq_exp = credit_quality.copy()
+                cq_exp["DT_COMPTC"] = cq_exp["DT_COMPTC"].dt.strftime("%Y-%m")
+                cq_exp.to_excel(writer, sheet_name="Qualidade Credito", index=False)
+            if sub_ratios is not None and not sub_ratios.empty:
+                sr_exp = sub_ratios.copy()
+                sr_exp["DT_COMPTC"] = sr_exp["DT_COMPTC"].dt.strftime("%Y-%m")
+                sr_exp.to_excel(writer, sheet_name="Subordinacao", index=False)
+            if not spread_metrics.empty:
+                sp_exp = spread_metrics.copy()
+                sp_exp["DT_COMPTC"] = sp_exp["DT_COMPTC"].dt.strftime("%Y-%m")
+                sp_exp.to_excel(writer, sheet_name="Performance", index=False)
+            if not flow_metrics.empty:
+                fl_exp = flow_metrics.copy()
+                fl_exp["DT_COMPTC"] = fl_exp["DT_COMPTC"].dt.strftime("%Y-%m")
+                fl_exp.to_excel(writer, sheet_name="Fluxo", index=False)
+        buf.seek(0)
+        st.download_button(
+            "Download Completo (Excel)",
+            buf.getvalue(),
+            file_name=f"{fn_safe}_relatorio_completo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )

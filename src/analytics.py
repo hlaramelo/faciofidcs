@@ -162,11 +162,23 @@ def compute_performance_metrics(
     return result
 
 
-def get_alert_flags(kpi_df: pd.DataFrame, per_class: dict[str, pd.DataFrame]) -> list[dict]:
+def get_alert_flags(
+    kpi_df: pd.DataFrame,
+    per_class: dict[str, pd.DataFrame],
+    thresholds: dict | None = None,
+) -> list[dict]:
     """Generate alert flags for concerning metrics.
 
     Returns list of dicts with keys: level ('danger', 'warning', 'info'), message, metric.
+    thresholds: optional dict with keys inad_danger, inad_warning, pl_danger, sub_danger, sub_warning.
     """
+    t = thresholds or {}
+    inad_danger = t.get("inad_danger", 15)
+    inad_warning = t.get("inad_warning", 10)
+    pl_danger = t.get("pl_danger", 10)
+    sub_danger = t.get("sub_danger", 10)
+    sub_warning = t.get("sub_warning", 20)
+
     alerts = []
     if kpi_df.empty or len(kpi_df) < 2:
         return alerts
@@ -179,13 +191,13 @@ def get_alert_flags(kpi_df: pd.DataFrame, per_class: dict[str, pd.DataFrame]) ->
         rate = latest.get("TAXA_INADIMPLENCIA")
         prev_rate = prev.get("TAXA_INADIMPLENCIA")
         if pd.notna(rate):
-            if rate > 15:
+            if rate > inad_danger:
                 alerts.append({
                     "level": "danger",
                     "message": f"Taxa de inadimplencia alta: {rate:.1f}%",
                     "metric": "TAXA_INADIMPLENCIA",
                 })
-            elif rate > 10:
+            elif rate > inad_warning:
                 alerts.append({
                     "level": "warning",
                     "message": f"Taxa de inadimplencia elevada: {rate:.1f}%",
@@ -213,13 +225,13 @@ def get_alert_flags(kpi_df: pd.DataFrame, per_class: dict[str, pd.DataFrame]) ->
         prev_pl = prev.get("PL")
         if pd.notna(pl) and pd.notna(prev_pl) and prev_pl > 0:
             pl_change = (pl - prev_pl) / prev_pl * 100
-            if pl_change < -10:
+            if pl_change < -pl_danger:
                 alerts.append({
                     "level": "danger",
                     "message": f"PL caiu {abs(pl_change):.1f}% no mes",
                     "metric": "PL",
                 })
-            elif pl_change < -5:
+            elif pl_change < -(pl_danger / 2):
                 alerts.append({
                     "level": "warning",
                     "message": f"PL caiu {abs(pl_change):.1f}% no mes",
@@ -231,13 +243,13 @@ def get_alert_flags(kpi_df: pd.DataFrame, per_class: dict[str, pd.DataFrame]) ->
     if sub_df is not None and "Subordinacao_Senior_%" in sub_df.columns and len(sub_df) > 0:
         latest_sub = sub_df.iloc[-1].get("Subordinacao_Senior_%")
         if pd.notna(latest_sub):
-            if latest_sub < 10:
+            if latest_sub < sub_danger:
                 alerts.append({
                     "level": "danger",
                     "message": f"Subordinacao senior baixa: {latest_sub:.1f}%",
                     "metric": "SUBORDINACAO",
                 })
-            elif latest_sub < 20:
+            elif latest_sub < sub_warning:
                 alerts.append({
                     "level": "warning",
                     "message": f"Subordinacao senior em atencao: {latest_sub:.1f}%",
@@ -300,6 +312,107 @@ def fetch_cdi_monthly(start_date: str, end_date: str) -> pd.DataFrame:
     df["DT_COMPTC"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
     df["CDI_%"] = pd.to_numeric(df["valor"], errors="coerce")
     return df[["DT_COMPTC", "CDI_%"]].sort_values("DT_COMPTC").reset_index(drop=True)
+
+
+def compute_cdi_spread(
+    perf_metrics: pd.DataFrame,
+    cdi_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compute spread (excess return) of fund over CDI.
+
+    Returns DataFrame with columns:
+    - DT_COMPTC, Rentabilidade_%, CDI_%, Spread_bps, Spread_%
+    - Acumulado_Fundo_%, Acumulado_CDI_%, Acumulado_Spread_bps
+    - Retorno_3M_%, Retorno_6M_%, Retorno_12M_%, Retorno_YTD_%
+    """
+    if perf_metrics.empty or "Rentabilidade_%" not in perf_metrics.columns:
+        return pd.DataFrame()
+
+    result = perf_metrics[["DT_COMPTC"]].copy()
+    result["Rentabilidade_%"] = perf_metrics["Rentabilidade_%"]
+
+    # Merge CDI
+    cdi_available = False
+    if cdi_df is not None and not cdi_df.empty and "CDI_%" in cdi_df.columns:
+        merged = result.merge(cdi_df[["DT_COMPTC", "CDI_%"]], on="DT_COMPTC", how="left")
+        result["CDI_%"] = merged["CDI_%"]
+        cdi_available = result["CDI_%"].notna().any()
+
+    if cdi_available:
+        result["Spread_%"] = result["Rentabilidade_%"] - result["CDI_%"]
+        result["Spread_bps"] = result["Spread_%"] * 100  # 1% = 100 bps
+
+    # Cumulative returns (compounded)
+    rentab = result["Rentabilidade_%"].fillna(0) / 100
+    result["Acumulado_Fundo_%"] = ((1 + rentab).cumprod() - 1) * 100
+
+    if cdi_available:
+        cdi_r = result["CDI_%"].fillna(0) / 100
+        result["Acumulado_CDI_%"] = ((1 + cdi_r).cumprod() - 1) * 100
+        result["Acumulado_Spread_bps"] = (
+            result["Acumulado_Fundo_%"] - result["Acumulado_CDI_%"]
+        ) * 100
+
+    # Rolling returns (3M, 6M, 12M)
+    for window, label in [(3, "3M"), (6, "6M"), (12, "12M")]:
+        if len(result) >= window:
+            rolling = (1 + rentab).rolling(window).apply(lambda x: x.prod() - 1, raw=True) * 100
+            result[f"Retorno_{label}_%"] = rolling
+
+    # YTD return
+    result["_year"] = result["DT_COMPTC"].dt.year
+    ytd_values = []
+    for _, group in result.groupby("_year"):
+        ytd = ((1 + group["Rentabilidade_%"].fillna(0) / 100).cumprod() - 1) * 100
+        ytd_values.append(ytd)
+    result["Retorno_YTD_%"] = pd.concat(ytd_values).sort_index()
+    result = result.drop(columns=["_year"])
+
+    return result
+
+
+def compute_data_quality(kpi_df: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> dict:
+    """Compute data quality metrics for the loaded data.
+
+    Returns dict with:
+    - completeness_pct: % of non-null KPI fields
+    - missing_kpis: list of KPI names that are entirely missing
+    - available_kpis: list of KPI names with data
+    - months_with_gaps: list of months where data may be incomplete
+    - total_months: total months in dataset
+    """
+    key_kpis = [
+        "PL", "ATIVO_TOTAL", "VALOR_COTA", "NR_COTISTAS",
+        "DC_PERFORMAR", "DC_NAO_PERFORMAR", "RENTAB_MES",
+        "AQUISICOES", "RESGATES",
+    ]
+
+    available = [k for k in key_kpis if k in kpi_df.columns and kpi_df[k].notna().any()]
+    missing = [k for k in key_kpis if k not in available]
+
+    total_cells = len(key_kpis) * len(kpi_df)
+    filled_cells = sum(
+        kpi_df[k].notna().sum() if k in kpi_df.columns else 0
+        for k in key_kpis
+    )
+    completeness = (filled_cells / total_cells * 100) if total_cells > 0 else 0
+
+    # Detect months with many missing fields
+    months_with_gaps = []
+    if "DT_COMPTC" in kpi_df.columns:
+        for _, row in kpi_df.iterrows():
+            missing_count = sum(1 for k in available if pd.isna(row.get(k)))
+            if missing_count > len(available) * 0.3:
+                months_with_gaps.append(row["DT_COMPTC"])
+
+    return {
+        "completeness_pct": completeness,
+        "missing_kpis": missing,
+        "available_kpis": available,
+        "months_with_gaps": months_with_gaps,
+        "total_months": len(kpi_df),
+        "total_tables": len(tables) if tables else 0,
+    }
 
 
 def format_brl(value: float | None) -> str:
