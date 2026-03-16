@@ -39,7 +39,7 @@ COLUMN_PATTERNS = {
         r"NR_COTISTAS_TOTAL",
         r"QT_COTST_TOTAL",
     ],
-    # Credit rights
+    # Credit rights — performing (tab_II, tab_V, or tab_I)
     "DC_PERFORMAR": [
         r"TAB_II.*PERFORM",
         r"TAB_V.*PERFORM",
@@ -47,7 +47,13 @@ COLUMN_PATTERNS = {
         r"VL_CART.*PERFORM",
         r"DC_PERFORMAR",
         r"VL_DIREITOS.*PERFORM",
+        # Resolution 175 / newer layouts
+        r"TAB_I1.*DIR.*CRED(?!.*NAO)",   # tab_I1 direitos creditorios (not NAO)
+        r"TAB_I1.*CARTEIRA(?!.*NAO)",     # tab_I1 carteira (not NAO)
+        r"VL_TOTAL.*PERFORM",
+        r"VL_DC.*PERFORM",
     ],
+    # Credit rights — non-performing (tab_II, tab_VI)
     "DC_NAO_PERFORMAR": [
         r"TAB_II.*NAO.*PERFORM",
         r"TAB_VI.*INADIMP",
@@ -55,17 +61,29 @@ COLUMN_PATTERNS = {
         r"VL_CART.*NAO.*PERFORM",
         r"DC_NAO_PERFORMAR",
         r"VL_DIREITOS.*NAO.*PERFORM",
+        # Resolution 175 / newer layouts
+        r"TAB_VI.*VL.*TOTAL(?!.*PERFORM)",  # tab_VI total (default portfolio)
+        r"VL_TOTAL.*NAO.*PERFORM",
+        r"VL_DC.*NAO.*PERFORM",
     ],
     # Acquisitions and redemptions
     "AQUISICOES": [
         r"TAB_VII.*AQUIS",
         r"TAB_I.*AQUIS",
         r"VL_AQUIS",
+        # Resolution 175 / newer layouts
+        r"TAB_VII.*CESS[AÃ]O",             # cessão (assignment)
+        r"TAB_VII.*VL.*TOTAL",              # tab_VII total
+        r"VL_CESS[AÃ]O",
+        r"VL_DC_AQUIS",
     ],
     "RESGATES": [
         r"RESG",
         r"TAB_X.*RESG",
         r"VL_RESG",
+        # Resolution 175 / newer layouts
+        r"TAB_X.*AMORTIZ",                  # amortizações
+        r"VL_AMORTIZ",
     ],
     # Monthly return (from tab_X)
     "RENTAB_MES": [
@@ -82,6 +100,9 @@ COLUMN_PATTERNS = {
         r"TAB_VI.*VL.*DEFAULT",
         r"VL_INADIMP",
         r"VL_CRED.*VENC",
+        # Resolution 175 / newer layouts
+        r"TAB_VI.*VL.*TOTAL",
+        r"TAB_V.*VENC",                     # tab_V vencidos
     ],
     "INADIMPLENCIA_PROVISAO": [
         r"TAB_VI.*PROVIS",
@@ -89,6 +110,9 @@ COLUMN_PATTERNS = {
         r"TAB_VI.*PERDA",
         r"VL_PROVIS",
         r"VL_PDD",
+        # Resolution 175 / newer layouts
+        r"TAB_I.*PROVIS",
+        r"TAB_I.*PDD",
     ],
     # Substitution of credit rights (from tab_VII)
     "SUBSTITUICAO": [
@@ -252,6 +276,19 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     print("\n  KPI column mappings discovered:")
     for kpi_name, (table_name, col) in all_columns_found.items():
         print(f"    {kpi_name} <- {table_name}.{col}")
+
+    # Log missing KPIs with available columns for diagnosis
+    missing = [k for k in COLUMN_PATTERNS if k not in all_columns_found]
+    if missing:
+        print(f"\n  KPIs NOT found: {', '.join(missing)}")
+        print("  Available columns per table (for diagnosis):")
+        for tname, tdf in tables.items():
+            # Only show numeric-ish columns (skip date/CNPJ/text)
+            numeric_cols = [c for c in tdf.columns
+                           if c not in ("DT_COMPTC", "CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE",
+                                        "CNPJ_CLASSE", "DENOM_SOCIAL", "CLASSE",
+                                        "CLASSE_UNICA", "TP_CLASSE", "NM_CLASSE")]
+            print(f"    {tname} ({len(tdf)} rows): {numeric_cols}")
 
     return kpi_df
 

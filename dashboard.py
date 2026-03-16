@@ -265,6 +265,10 @@ def load_consolidated_data(start_str: str, end_str: str):
     for fund in FUNDS:
         result = load_data(start_str, end_str, fund["cnpj_raw"], fund["name"])
         kpi, tables, per_class, cdi = result
+        if tables:
+            for tname, tdf in tables.items():
+                key = f"{tname} ({fund['name']})"
+                all_tables[key] = tdf
         if kpi is not None and not kpi.empty:
             # Tag each row with fund name
             kpi_copy = kpi.copy()
@@ -1238,6 +1242,18 @@ with tab_flow:
     st.markdown('<div class="section-header">Fluxo da Carteira</div>', unsafe_allow_html=True)
 
     flow_latest = flow_metrics.iloc[-1] if not flow_metrics.empty else {}
+
+    # Check if flow data exists
+    has_flow = any(
+        c in flow_metrics.columns
+        for c in ["Aquisicoes", "Resgates", "Substituicoes", "Fluxo_Liquido"]
+    )
+    if not has_flow:
+        st.warning(
+            "Dados de fluxo indisponiveis para este fundo. "
+            "Os KPIs AQUISICOES, RESGATES e SUBSTITUICAO nao foram encontrados nos dados CVM. "
+            "Verifique a aba 'Dados Brutos' para inspecionar as colunas disponiveis."
+        )
 
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
