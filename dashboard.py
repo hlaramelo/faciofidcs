@@ -17,9 +17,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_DIR, FUNDS
 from src.analytics import (
     compute_cdi_spread,
+    compute_covenant_timeline,
     compute_credit_quality_metrics,
     compute_data_quality,
     compute_flow_metrics,
+    compute_maturity_buckets,
     compute_performance_metrics,
     compute_pl_waterfall,
     compute_subordination_ratios,
@@ -555,18 +557,20 @@ sub_ratios = compute_subordination_ratios(per_class)
 spread_metrics = compute_cdi_spread(perf_metrics, cdi_df)
 pl_waterfall = compute_pl_waterfall(kpi_df)
 data_quality = compute_data_quality(kpi_df, tables)
+maturity_buckets = compute_maturity_buckets(tables)
+
+# Covenant thresholds dict for reuse
+covenant_thresholds = {
+    "inad_danger": thresh_inad_danger,
+    "inad_warning": thresh_inad_warning,
+    "pl_danger": thresh_pl_danger,
+    "sub_danger": thresh_sub_danger,
+    "sub_warning": thresh_sub_warning,
+}
+covenant_timeline = compute_covenant_timeline(kpi_df, per_class, covenant_thresholds)
 
 # Pass custom thresholds to alert function
-alerts = get_alert_flags(
-    kpi_df, per_class,
-    thresholds={
-        "inad_danger": thresh_inad_danger,
-        "inad_warning": thresh_inad_warning,
-        "pl_danger": thresh_pl_danger,
-        "sub_danger": thresh_sub_danger,
-        "sub_warning": thresh_sub_warning,
-    },
-)
+alerts = get_alert_flags(kpi_df, per_class, thresholds=covenant_thresholds)
 
 latest = kpi_df.iloc[-1]
 prev = kpi_df.iloc[-2] if len(kpi_df) > 1 else None
@@ -614,11 +618,12 @@ st.markdown("")
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab_overview, tab_credit, tab_subordination, tab_performance, tab_compare, tab_flow, tab_data = st.tabs([
+tab_overview, tab_credit, tab_subordination, tab_performance, tab_covenants, tab_compare, tab_flow, tab_data = st.tabs([
     "Visao Geral",
     "Qualidade de Credito",
     "Subordinacao",
     "Performance",
+    "Covenants",
     "Comparacao Fundos",
     "Fluxo da Carteira",
     "Dados Brutos",
@@ -1002,6 +1007,23 @@ with tab_performance:
     with rc4:
         st.metric("Retorno 12M", format_pct(spread_latest.get("Retorno_12M_%")))
 
+    # Row 3: risk metrics
+    rk1, rk2, rk3, rk4 = st.columns(4)
+    with rk1:
+        vol6 = spread_latest.get("Vol_6M_%")
+        st.metric("Volatilidade 6M", format_pct(vol6))
+    with rk2:
+        vol12 = spread_latest.get("Vol_12M_%")
+        st.metric("Volatilidade 12M", format_pct(vol12))
+    with rk3:
+        sharpe6 = spread_latest.get("Sharpe_6M")
+        sharpe_label = f"{sharpe6:.2f}" if pd.notna(sharpe6) else "—"
+        st.metric("Sharpe 6M", sharpe_label)
+    with rk4:
+        sharpe12 = spread_latest.get("Sharpe_12M")
+        sharpe_label = f"{sharpe12:.2f}" if pd.notna(sharpe12) else "—"
+        st.metric("Sharpe 12M", sharpe_label)
+
     st.markdown("")
 
     col1, col2 = st.columns(2)
@@ -1188,7 +1210,147 @@ with tab_performance:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 5: FUND COMPARISON
+# TAB 5: COVENANTS & MONITORING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_covenants:
+    st.markdown('<div class="section-header">Monitoramento de Covenants</div>', unsafe_allow_html=True)
+
+    if covenant_timeline is not None and not covenant_timeline.empty:
+        cov_cols = [c for c in covenant_timeline.columns if c not in ("DT_COMPTC", "Compliant")]
+
+        # Summary: current compliance status
+        cov_latest = covenant_timeline.iloc[-1]
+        overall = cov_latest.get("Compliant", True)
+        status_color = COLORS["success"] if overall else COLORS["danger"]
+        status_text = "Compliant" if overall else "Breach Detectado"
+        st.markdown(
+            f'<div style="text-align:center;padding:10px;background:{status_color}20;'
+            f'border-left:4px solid {status_color};border-radius:4px;margin-bottom:16px">'
+            f'<span style="font-size:1.3em;font-weight:600;color:{status_color}">{status_text}</span>'
+            f' — {date_label}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Individual covenant status cards
+        cov_card_cols = st.columns(len(cov_cols)) if cov_cols else []
+        for i, col_name in enumerate(cov_cols):
+            with cov_card_cols[i]:
+                val = cov_latest.get(col_name)
+                icon = "✅" if val else "❌"
+                st.metric(col_name, icon)
+
+        st.markdown("")
+
+        # Covenant compliance heatmap over time
+        cov_display = covenant_timeline.copy()
+        cov_display["DT_COMPTC"] = pd.to_datetime(cov_display["DT_COMPTC"]).dt.strftime("%Y-%m")
+
+        # Build heatmap using plotly
+        if cov_cols:
+            z_data = []
+            for col_name in cov_cols:
+                z_data.append(covenant_timeline[col_name].astype(int).tolist())
+
+            fig = go.Figure(data=go.Heatmap(
+                z=z_data,
+                x=cov_display["DT_COMPTC"],
+                y=cov_cols,
+                colorscale=[[0, COLORS["danger"]], [1, COLORS["success"]]],
+                showscale=False,
+                hovertemplate="Mes: %{x}<br>Covenant: %{y}<br>Status: %{z}<extra></extra>",
+            ))
+            fig.update_layout(
+                **CHART_LAYOUT,
+                title="Historico de Compliance (verde = OK, vermelho = breach)",
+                yaxis=dict(tickfont=dict(size=11)),
+            )
+            fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+            st.plotly_chart(fig, width="stretch", key="covenant_heatmap")
+
+        # Compliance rate over time
+        if "Compliant" in covenant_timeline.columns:
+            cov_rate = covenant_timeline.copy()
+            cov_rate["Compliance_%"] = cov_rate[cov_cols].mean(axis=1) * 100
+            fig = styled_line_chart(
+                cov_rate, "DT_COMPTC", ["Compliance_%"],
+                "Taxa de Compliance Geral (%)", y_format="pct",
+                colors=[COLORS["primary"]],
+            )
+            # Add 100% reference line
+            fig.add_hline(y=100, line_dash="dash", line_color=COLORS["success"], opacity=0.5)
+            st.plotly_chart(fig, width="stretch", key="covenant_rate")
+
+        # Alert history: months with breaches
+        breach_months = covenant_timeline[~covenant_timeline["Compliant"]].copy()
+        if not breach_months.empty:
+            st.markdown("#### Historico de Breaches")
+            breach_display = breach_months[["DT_COMPTC"] + cov_cols].copy()
+            breach_display["DT_COMPTC"] = pd.to_datetime(breach_display["DT_COMPTC"]).dt.strftime("%Y-%m")
+            # Show only breached covenants per month
+            for _, row in breach_display.iterrows():
+                breached = [c for c in cov_cols if not row[c]]
+                if breached:
+                    st.markdown(
+                        f'<span style="color:{COLORS["danger"]};font-weight:600">{row["DT_COMPTC"]}</span>'
+                        f' — Breach: {", ".join(breached)}',
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.success("Nenhum breach detectado no historico.")
+
+        with st.expander("Dados detalhados - Covenants"):
+            display_cov = covenant_timeline.copy()
+            display_cov["DT_COMPTC"] = display_cov["DT_COMPTC"].dt.strftime("%Y-%m")
+            st.dataframe(display_cov, width="stretch", hide_index=True)
+    else:
+        st.info("Dados insuficientes para monitoramento de covenants.")
+
+    # Maturity bucketing section
+    st.markdown("")
+    st.markdown('<div class="section-header">Perfil de Vencimentos</div>', unsafe_allow_html=True)
+
+    if maturity_buckets is not None and not maturity_buckets.empty:
+        mat_cols = [c for c in maturity_buckets.columns if c != "DT_COMPTC"]
+        if mat_cols:
+            # Stacked area for maturity profile evolution
+            fig = styled_area_chart(
+                maturity_buckets, "DT_COMPTC", mat_cols,
+                "Distribuicao por Prazo de Vencimento", y_format="brl",
+            )
+            st.plotly_chart(fig, width="stretch", key="maturity_area")
+
+            # Latest month pie chart
+            mat_latest = maturity_buckets.iloc[-1]
+            labels = mat_cols
+            values = [mat_latest.get(c, 0) for c in mat_cols]
+            if any(v > 0 for v in values):
+                fig = go.Figure(data=[go.Pie(
+                    labels=labels, values=values,
+                    hole=0.4,
+                    textinfo="label+percent",
+                    textfont_size=12,
+                )])
+                fig.update_layout(
+                    **{k: v for k, v in CHART_LAYOUT.items() if k != "hovermode"},
+                    title=f"Perfil de Vencimentos — {date_label}",
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, width="stretch", key="maturity_pie")
+
+            with st.expander("Dados detalhados - Vencimentos"):
+                display_mat = maturity_buckets.copy()
+                display_mat["DT_COMPTC"] = display_mat["DT_COMPTC"].dt.strftime("%Y-%m")
+                st.dataframe(display_mat, width="stretch", hide_index=True)
+    else:
+        st.info(
+            "Dados de vencimento (tab_V) nao disponiveis. "
+            "Esta tabela pode nao estar presente nos dados CVM para este fundo."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6: FUND COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_compare:
@@ -1233,10 +1395,13 @@ with tab_compare:
         if len(all_fund_kpis) < 2:
             st.warning("Dados insuficientes para comparacao no periodo selecionado.")
         else:
-            # Comparison metrics table
+            # Comparison metrics table (expanded)
             comp_rows = []
             for fname, fkpi in all_fund_kpis.items():
                 fl = fkpi.iloc[-1]
+                aquis = fl.get("AQUISICOES", 0) or 0
+                resg = abs(fl.get("RESGATES", 0) or 0)
+                net_flow = aquis - resg if (aquis or resg) else None
                 comp_rows.append({
                     "Fundo": fname,
                     "PL": format_brl(fl.get("PL")),
@@ -1244,6 +1409,7 @@ with tab_compare:
                     "Rentab. Mensal (%)": format_pct(fl.get("RENTAB_MES")),
                     "Valor Cota": format_brl(fl.get("VALOR_COTA")),
                     "Cotistas": int(fl.get("NR_COTISTAS")) if pd.notna(fl.get("NR_COTISTAS")) else "—",
+                    "Fluxo Liquido": format_brl(net_flow),
                 })
             st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True)
 
@@ -1318,6 +1484,48 @@ with tab_compare:
                 fig.update_yaxes(tickformat=",.2f", tickprefix="R$ ")
                 fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
                 st.plotly_chart(fig, width="stretch", key="comp_cota")
+
+            # Row 3: Flow & Provisioning comparison
+            comp_col5, comp_col6 = st.columns(2)
+
+            with comp_col5:
+                # Net flow comparison
+                fig = go.Figure()
+                has_flow_data = False
+                for i, (fname, fkpi) in enumerate(all_fund_kpis.items()):
+                    if "AQUISICOES" in fkpi.columns and "RESGATES" in fkpi.columns:
+                        net = fkpi["AQUISICOES"].fillna(0) - fkpi["RESGATES"].fillna(0).abs()
+                        fig.add_trace(go.Bar(
+                            x=fkpi["DT_COMPTC"], y=net,
+                            name=fname, marker_color=palette[i % len(palette)],
+                            opacity=0.8,
+                        ))
+                        has_flow_data = True
+                if has_flow_data:
+                    fig.update_layout(**CHART_LAYOUT, title="Fluxo Liquido", barmode="group")
+                    fig.update_yaxes(tickformat=",.0f", tickprefix="R$ ")
+                    fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+                    st.plotly_chart(fig, width="stretch", key="comp_flow")
+                else:
+                    st.info("Dados de fluxo nao disponiveis para comparacao.")
+
+            with comp_col6:
+                # Cotistas comparison
+                fig = go.Figure()
+                has_cotistas = False
+                for i, (fname, fkpi) in enumerate(all_fund_kpis.items()):
+                    if "NR_COTISTAS" in fkpi.columns:
+                        fig.add_trace(go.Scatter(
+                            x=fkpi["DT_COMPTC"], y=fkpi["NR_COTISTAS"],
+                            name=fname, mode="lines+markers",
+                            line=dict(color=palette[i % len(palette)], width=2.5),
+                            marker=dict(size=5),
+                        ))
+                        has_cotistas = True
+                if has_cotistas:
+                    fig.update_layout(**CHART_LAYOUT, title="Numero de Cotistas")
+                    fig.update_xaxes(dtick="M1", tickformat="%b/%Y")
+                    st.plotly_chart(fig, width="stretch", key="comp_cotistas")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1474,6 +1682,10 @@ with st.sidebar:
                 fl_exp = flow_metrics.copy()
                 fl_exp["DT_COMPTC"] = fl_exp["DT_COMPTC"].dt.strftime("%Y-%m")
                 fl_exp.to_excel(writer, sheet_name="Fluxo", index=False)
+            if covenant_timeline is not None and not covenant_timeline.empty:
+                ct_exp = covenant_timeline.copy()
+                ct_exp["DT_COMPTC"] = ct_exp["DT_COMPTC"].dt.strftime("%Y-%m")
+                ct_exp.to_excel(writer, sheet_name="Covenants", index=False)
         buf.seek(0)
         st.download_button(
             "Download Completo (Excel)",

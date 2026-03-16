@@ -326,6 +326,133 @@ def get_alert_flags(
     return alerts
 
 
+def compute_covenant_timeline(
+    kpi_df: pd.DataFrame,
+    per_class: dict[str, pd.DataFrame],
+    thresholds: dict | None = None,
+) -> pd.DataFrame | None:
+    """Track covenant compliance over time.
+
+    Returns DataFrame with DT_COMPTC and boolean columns for each covenant:
+    True = compliant, False = breached.
+    """
+    if kpi_df.empty or "DT_COMPTC" not in kpi_df.columns:
+        return None
+
+    t = thresholds or {}
+    max_inad = t.get("inad_danger", 15.0)
+    min_sub = t.get("sub_danger", 10.0)
+    max_pl_drop = t.get("pl_danger", 10.0)
+
+    result = kpi_df[["DT_COMPTC"]].copy()
+
+    # Covenant 1: Inadimplência below threshold
+    if "TAXA_INADIMPLENCIA" in kpi_df.columns:
+        result[f"Inadimp < {max_inad:.0f}%"] = kpi_df["TAXA_INADIMPLENCIA"].apply(
+            lambda x: True if pd.isna(x) else x <= max_inad
+        )
+
+    # Covenant 2: Subordination above minimum
+    sub_df = compute_subordination_ratios(per_class)
+    if sub_df is not None and "Subordinacao_Senior_%" in sub_df.columns:
+        merged = result.merge(
+            sub_df[["DT_COMPTC", "Subordinacao_Senior_%"]], on="DT_COMPTC", how="left"
+        )
+        result[f"Subord > {min_sub:.0f}%"] = merged["Subordinacao_Senior_%"].apply(
+            lambda x: True if pd.isna(x) else x >= min_sub
+        )
+
+    # Covenant 3: PL not declining more than threshold MoM
+    if "PL" in kpi_df.columns:
+        pl_pct = kpi_df["PL"].pct_change(fill_method=None) * 100
+        result[f"PL queda < {max_pl_drop:.0f}%"] = pl_pct.apply(
+            lambda x: True if pd.isna(x) else x >= -max_pl_drop
+        )
+
+    # Covenant 4: Positive net flow
+    if "AQUISICOES" in kpi_df.columns and "RESGATES" in kpi_df.columns:
+        net = kpi_df["AQUISICOES"].fillna(0) - kpi_df["RESGATES"].fillna(0).abs()
+        result["Fluxo positivo"] = net >= 0
+
+    # Overall compliance
+    cov_cols = [c for c in result.columns if c != "DT_COMPTC"]
+    if cov_cols:
+        result["Compliant"] = result[cov_cols].all(axis=1)
+    else:
+        return None
+
+    return result
+
+
+def compute_maturity_buckets(tables: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
+    """Extract maturity bucketing data from tab_V (credit rights by maturity).
+
+    CVM tab_V contains credit rights broken down by remaining maturity.
+    Returns DataFrame with DT_COMPTC and columns for each maturity bucket.
+    """
+    import re
+
+    # Find tab_V tables
+    tab_v_df = None
+    for name, df in (tables or {}).items():
+        if re.match(r"tab_V\b", name, re.IGNORECASE) or "tab_V" in name:
+            tab_v_df = df
+            break
+
+    if tab_v_df is None or tab_v_df.empty:
+        return None
+
+    if "DT_COMPTC" not in tab_v_df.columns:
+        return None
+
+    # Look for maturity-related columns (prazo, vencimento, faixa)
+    maturity_cols = [
+        c for c in tab_v_df.columns
+        if re.search(r"(PRAZO|VENC|FAIXA|BUCKET|VL_)", c, re.IGNORECASE)
+        and c not in ("DT_COMPTC", "CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "DENOM_SOCIAL")
+    ]
+
+    if not maturity_cols:
+        # Try to detect value columns (anything numeric that's not an ID)
+        id_cols = {"DT_COMPTC", "CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "DENOM_SOCIAL", "CLASSE"}
+        for c in tab_v_df.columns:
+            if c not in id_cols:
+                try:
+                    pd.to_numeric(tab_v_df[c], errors="raise")
+                    maturity_cols.append(c)
+                except (ValueError, TypeError):
+                    pass
+
+    if not maturity_cols:
+        return None
+
+    result = tab_v_df[["DT_COMPTC"] + maturity_cols].copy()
+    result["DT_COMPTC"] = pd.to_datetime(result["DT_COMPTC"], errors="coerce")
+
+    # Convert value columns to numeric
+    for c in maturity_cols:
+        result[c] = pd.to_numeric(result[c], errors="coerce")
+
+    # Group by date (sum across rows for same date, e.g. multiple classes)
+    result = result.groupby("DT_COMPTC", as_index=False)[maturity_cols].sum()
+    result = result.sort_values("DT_COMPTC").reset_index(drop=True)
+
+    # Clean column names for display
+    rename_map = {}
+    for c in maturity_cols:
+        clean = (
+            c.replace("TAB_V_", "")
+            .replace("TAB_V1_", "")
+            .replace("VL_", "")
+            .replace("_", " ")
+            .title()
+        )
+        rename_map[c] = clean
+    result = result.rename(columns=rename_map)
+
+    return result
+
+
 def fetch_cdi_monthly(start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch monthly CDI accumulated rate from BCB SGS API.
 
@@ -397,6 +524,20 @@ def compute_cdi_spread(
         if len(result) >= window:
             rolling = (1 + rentab).rolling(window).apply(lambda x: x.prod() - 1, raw=True) * 100
             result[f"Retorno_{label}_%"] = rolling
+
+    # Rolling volatility (annualized std of monthly returns)
+    for window, label in [(6, "6M"), (12, "12M")]:
+        if len(result) >= window:
+            result[f"Vol_{label}_%"] = rentab.rolling(window).std() * np.sqrt(12) * 100
+
+    # Sharpe ratio (annualized, using CDI as risk-free rate)
+    if cdi_available:
+        excess = rentab - result["CDI_%"].fillna(0) / 100
+        for window, label in [(6, "6M"), (12, "12M")]:
+            if len(result) >= window:
+                roll_mean = excess.rolling(window).mean() * 12
+                roll_std = excess.rolling(window).std() * np.sqrt(12)
+                result[f"Sharpe_{label}"] = roll_mean / roll_std.replace(0, np.nan)
 
     # YTD return
     result["_year"] = result["DT_COMPTC"].dt.year
