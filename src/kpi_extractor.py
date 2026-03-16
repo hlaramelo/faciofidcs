@@ -37,31 +37,46 @@ COLUMN_PATTERNS = {
         r"TAB_X.*NR_COTST",
         r"TAB_X.*QT_COTIST",
         r"TAB_X_1.*NR_COTST",
+        r"NR_COTISTAS",
+        r"QT_COTST",
+        r"QT_COTISTAS",
+        r"TAB_I.*NR_COTST",
+        r"TAB_I.*COTIST",
     ],
     # Credit rights
     "DC_PERFORMAR": [
         r"TAB_II.*PERFORM",
         r"TAB_V.*PERFORM",
         r"TAB_II.*VL_CART.*PERFORM",
+        r"VL_CART.*PERFORM",
+        r"DC_PERFORMAR",
+        r"VL_DIREITOS.*PERFORM",
     ],
     "DC_NAO_PERFORMAR": [
         r"TAB_II.*NAO.*PERFORM",
         r"TAB_VI.*INADIMP",
         r"TAB_II.*VL_CART.*NAO.*PERFORM",
+        r"VL_CART.*NAO.*PERFORM",
+        r"DC_NAO_PERFORMAR",
+        r"VL_DIREITOS.*NAO.*PERFORM",
     ],
     # Acquisitions and redemptions
     "AQUISICOES": [
         r"TAB_VII.*AQUIS",
         r"TAB_I.*AQUIS",
+        r"VL_AQUIS",
     ],
     "RESGATES": [
         r"RESG",
         r"TAB_X.*RESG",
+        r"VL_RESG",
     ],
     # Monthly return (from tab_X)
     "RENTAB_MES": [
         r"TAB_X_VL_RENTAB_MES",
         r"TAB_X.*RENTAB",
+        r"RENTAB_MES",
+        r"VL_RENTAB",
     ],
     # Inadimplência / default (from tab_VI)
     "INADIMPLENCIA_VL": [
@@ -69,16 +84,21 @@ COLUMN_PATTERNS = {
         r"TAB_VI.*VL_CRED.*VENC",
         r"TAB_VI.*ATRASO",
         r"TAB_VI.*VL.*DEFAULT",
+        r"VL_INADIMP",
+        r"VL_CRED.*VENC",
     ],
     "INADIMPLENCIA_PROVISAO": [
         r"TAB_VI.*PROVIS",
         r"TAB_VI.*PDD",
         r"TAB_VI.*PERDA",
+        r"VL_PROVIS",
+        r"VL_PDD",
     ],
     # Substitution of credit rights (from tab_VII)
     "SUBSTITUICAO": [
         r"TAB_VII.*SUBSTIT",
         r"TAB_VII.*VL.*SUBSTIT",
+        r"VL_SUBSTIT",
     ],
 }
 
@@ -268,6 +288,17 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
     if cota_class_df is not None:
         result["cota_por_classe"] = cota_class_df
 
+    # --- NR_COTISTAS por Classe ---
+    nr_class_df = _pivot_by_class(
+        tables,
+        table_priority=["tab_I", "tab_X_1"],
+        value_patterns=[r"NR_COTST", r"NR_COTISTAS", r"QT_COTST",
+                        r"QT_COTISTAS", r"TAB_X.*NR_COTST"],
+        label="Cotistas",
+    )
+    if nr_class_df is not None:
+        result["cotistas_por_classe"] = nr_class_df
+
     return result
 
 
@@ -279,15 +310,16 @@ def _normalize_class_name(raw_name: str) -> str:
         'Subclasse Subordinada Mezanino 1 |' -> 'Mezanino'
         'SENIOR' -> 'Senior'
         'Classe Subordinada' -> 'Subordinada'
+        'Facio 3 FIDC RL - Subclasse Senior Serie 1' -> 'Senior'
     """
     name = str(raw_name).strip().upper()
     # Order matters: check Mezanino before Subordinada since
     # "Subordinada Mezanino" should map to Mezanino
-    if "MEZANINO" in name or "MEZZANIN" in name:
+    if "MEZANINO" in name or "MEZZANIN" in name or "MEZZAN" in name:
         return "Mezanino"
-    if "SENIOR" in name or "SÊNIOR" in name or "SENIO" in name:
+    if "SENIOR" in name or "SÊNIOR" in name or "SENIO" in name or "SÊNIO" in name:
         return "Senior"
-    if "SUBORDINAD" in name or "JUNIOR" in name or "JÚNIOR" in name:
+    if "SUBORDINAD" in name or "JUNIOR" in name or "JÚNIOR" in name or "SUB " in name:
         return "Subordinada"
     # Fallback: return cleaned original
     return raw_name.strip().title()
@@ -304,10 +336,10 @@ def _pivot_by_class(
     Searches tables in priority order. Looks for a class identifier column
     and a numeric value column matching the patterns.
     """
-    # Possible class identifier columns
+    # Possible class identifier columns (order matters: prefer specific over generic)
     class_col_candidates = [
         "CLASSE", "TAB_X_CLASSE_SERIE", "CLASSE_SERIE",
-        "TP_CLASSE", "DS_CLASSE", "DENOM_SOCIAL",
+        "TP_CLASSE", "DS_CLASSE", "NM_CLASSE", "DENOM_SOCIAL",
     ]
 
     for table_name in table_priority:

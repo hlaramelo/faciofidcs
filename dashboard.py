@@ -215,7 +215,7 @@ def styled_area_chart(df, x, y_cols, title, y_format=None, colors=None):
 # ── Data loading ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_data(start_str: str, end_str: str, cnpj_raw: str):
+def load_data(start_str: str, end_str: str, cnpj_raw: str, fund_display_name: str = ""):
     """Download, parse, and extract KPIs for a single fund. Cached for 1 hour."""
     from datetime import date as d
 
@@ -228,7 +228,9 @@ def load_data(start_str: str, end_str: str, cnpj_raw: str):
     if not data_dirs:
         return None, None, None, None
 
-    tables = parse_all_tables(data_dirs, [cnpj_raw])
+    # Pass fund name for DENOM_SOCIAL fallback filtering
+    fund_names_hint = [fund_display_name] if fund_display_name else None
+    tables = parse_all_tables(data_dirs, [cnpj_raw], fund_names=fund_names_hint)
     if not tables:
         return None, None, None, None
 
@@ -329,7 +331,7 @@ start_str = start_month.strftime("%Y-%m")
 end_str = end_month.strftime("%Y-%m")
 
 with st.spinner("Carregando dados do CVM..."):
-    kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str, selected_fund["cnpj_raw"])
+    kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str, selected_fund["cnpj_raw"], fund_name)
 
 if kpi_df is None or kpi_df.empty:
     st.error("Nenhum dado disponivel. Verifique a conexao e o periodo selecionado.")
@@ -448,12 +450,21 @@ with tab_overview:
         nr = latest.get("NR_COTISTAS")
         st.metric("Cotistas", f"{int(nr)}" if pd.notna(nr) else "—", _delta("NR_COTISTAS"))
     with c6:
-        st.metric("Aquisicoes", format_brl(latest.get("AQUISICOES")), _delta("AQUISICOES"))
-    with c7:
-        st.metric("Resgates", format_brl(latest.get("RESGATES")), _delta("RESGATES"))
-    with c8:
         rentab = latest.get("RENTAB_MES")
         st.metric("Rentabilidade Mensal", format_pct(rentab), None)
+    with c7:
+        # Subordination index
+        sub_val = None
+        sub_delta = None
+        if sub_ratios is not None and "Subordinacao_Senior_%" in sub_ratios.columns and len(sub_ratios) > 0:
+            sub_val = sub_ratios.iloc[-1].get("Subordinacao_Senior_%")
+            if len(sub_ratios) > 1:
+                sub_prev = sub_ratios.iloc[-2].get("Subordinacao_Senior_%")
+                if pd.notna(sub_val) and pd.notna(sub_prev):
+                    sub_delta = f"{sub_val - sub_prev:+.2f}pp"
+        st.metric("Subordinacao Senior", format_pct(sub_val), sub_delta)
+    with c8:
+        st.metric("Aquisicoes", format_brl(latest.get("AQUISICOES")), _delta("AQUISICOES"))
 
     st.markdown("")
 
@@ -838,11 +849,50 @@ with tab_performance:
 
     with col6:
         if "Nr_Cotistas" in perf_metrics.columns:
-            fig = styled_line_chart(
-                perf_metrics, "DT_COMPTC", ["Nr_Cotistas"],
-                "Numero de Cotistas", colors=[COLORS["info"]],
-            )
+            # Use per-class cotistas data if available (more complete)
+            cotistas_df = per_class.get("cotistas_por_classe")
+            if cotistas_df is not None and not cotistas_df.empty:
+                cotistas_cols = [c for c in cotistas_df.columns if c != "DT_COMPTC"]
+                # Sum across classes for total cotistas
+                total_cotistas = cotistas_df.copy()
+                total_cotistas["Total Cotistas"] = total_cotistas[cotistas_cols].sum(axis=1)
+                fig = styled_line_chart(
+                    total_cotistas, "DT_COMPTC", ["Total Cotistas"],
+                    "Numero de Cotistas", colors=[COLORS["info"]],
+                )
+            else:
+                fig = styled_line_chart(
+                    perf_metrics, "DT_COMPTC", ["Nr_Cotistas"],
+                    "Numero de Cotistas", colors=[COLORS["info"]],
+                )
             st.plotly_chart(fig, use_container_width=True, key="perf_cotistas")
+
+    # Row 4: Subordination and Default Rate
+    col7, col8 = st.columns(2)
+
+    with col7:
+        if sub_ratios is not None and "Subordinacao_Senior_%" in sub_ratios.columns:
+            sub_cols = [c for c in sub_ratios.columns if c.endswith("_%") and "Subordinacao" in c]
+            if sub_cols:
+                fig = styled_line_chart(
+                    sub_ratios, "DT_COMPTC", sub_cols,
+                    "Indice de Subordinacao", y_format="pct",
+                    colors=[COLORS["primary"], COLORS["warning"]],
+                )
+                st.plotly_chart(fig, use_container_width=True, key="perf_subordinacao")
+        else:
+            st.info("Indice de subordinacao: dados por classe nao disponiveis.")
+
+    with col8:
+        if "Taxa_Inadimplencia_%" in credit_quality.columns:
+            fig = styled_line_chart(
+                credit_quality, "DT_COMPTC", ["Taxa_Inadimplencia_%"],
+                "Taxa de Inadimplencia", y_format="pct",
+                colors=[COLORS["danger"]],
+            )
+            st.plotly_chart(fig, use_container_width=True, key="perf_inadimplencia")
+        else:
+            st.info("Dados de inadimplencia nao disponiveis para este periodo.")
 
     with st.expander("Dados detalhados - Performance & Spread"):
         if not spread_metrics.empty:
@@ -871,7 +921,7 @@ with tab_compare:
         st.markdown("Comparando com o fundo selecionado na sidebar.")
 
         @st.cache_data(ttl=3600, show_spinner=False)
-        def load_comparison_data(fund_cnpj_raw: str, s_str: str, e_str: str):
+        def load_comparison_data(fund_cnpj_raw: str, s_str: str, e_str: str, comp_fund_name: str = ""):
             """Load KPIs for a comparison fund."""
             from datetime import date as d
             s_parts = s_str.split("-")
@@ -881,7 +931,8 @@ with tab_compare:
             data_dirs = download_monthly_zips(s_date, e_date)
             if not data_dirs:
                 return None
-            t = parse_all_tables(data_dirs, [fund_cnpj_raw])
+            fund_names_hint = [comp_fund_name] if comp_fund_name else None
+            t = parse_all_tables(data_dirs, [fund_cnpj_raw], fund_names=fund_names_hint)
             if not t:
                 return None
             kdf = extract_kpis(t)
@@ -893,7 +944,7 @@ with tab_compare:
         with st.spinner("Carregando dados dos outros fundos..."):
             for cf in compare_funds:
                 cf_start = max(start_str, cf["start_date"][:7])
-                cf_kpi = load_comparison_data(cf["cnpj_raw"], cf_start, end_str)
+                cf_kpi = load_comparison_data(cf["cnpj_raw"], cf_start, end_str, cf["name"])
                 if cf_kpi is not None and not cf_kpi.empty:
                     all_fund_kpis[cf["name"]] = cf_kpi
 

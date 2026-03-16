@@ -17,12 +17,15 @@ def read_csv_file(csv_path: Path) -> pd.DataFrame:
     )
 
 
-def filter_by_cnpj(df: pd.DataFrame, cnpjs: list[str]) -> pd.DataFrame:
+def filter_by_cnpj(
+    df: pd.DataFrame, cnpjs: list[str], fund_names: list[str] | None = None
+) -> pd.DataFrame:
     """Filter DataFrame to only include rows for the specified CNPJs.
 
     Handles both formatted (XX.XXX.XXX/XXXX-XX) and raw (XXXXXXXXXXXXXX) CNPJs.
     When the table uses CNPJ_FUNDO_CLASSE (class-level CNPJs), finds the matching
     class first, then includes all sibling classes of the same fund.
+    fund_names: optional list of fund base names for DENOM_SOCIAL fallback matching.
     """
     if df.empty:
         return df
@@ -45,10 +48,10 @@ def filter_by_cnpj(df: pd.DataFrame, cnpjs: list[str]) -> pd.DataFrame:
         if not direct_match.empty:
             # Find sibling classes via DENOM_SOCIAL (fund name) or shared date rows
             if "DENOM_SOCIAL" in df.columns:
-                fund_names = direct_match["DENOM_SOCIAL"].dropna().unique()
+                fund_names_from_match = direct_match["DENOM_SOCIAL"].dropna().unique()
                 # Extract base fund name (strip class suffixes)
                 base_names = set()
-                for name in fund_names:
+                for name in fund_names_from_match:
                     base = _extract_fund_base_name(str(name))
                     base_names.add(base)
                 # Find all rows whose DENOM_SOCIAL starts with any base name
@@ -72,7 +75,20 @@ def filter_by_cnpj(df: pd.DataFrame, cnpjs: list[str]) -> pd.DataFrame:
         if not result.empty:
             return result
 
-    return df
+    # Fallback: search by fund name in DENOM_SOCIAL when no CNPJ match
+    if fund_names and "DENOM_SOCIAL" in df.columns:
+        base_names = {_extract_fund_base_name(n) for n in fund_names}
+        mask = df["DENOM_SOCIAL"].apply(
+            lambda x: any(
+                _extract_fund_base_name(str(x)) == b for b in base_names
+            )
+            if pd.notna(x) else False
+        )
+        result = df[mask].copy()
+        if not result.empty:
+            return result
+
+    return pd.DataFrame(columns=df.columns)
 
 
 def _extract_fund_base_name(name: str) -> str:
@@ -82,7 +98,9 @@ def _extract_fund_base_name(name: str) -> str:
     """
     # Split on common separators between fund name and class info
     for sep in [" - Subclasse", " - Classe", " - Sub", " Subclasse", " Classe Senior",
-                " Classe Mezanino", " Classe Subordinada", " Classe Mezzanin"]:
+                " Classe Mezanino", " Classe Subordinada", " Classe Mezzanin",
+                " Senior", " Mezanino", " Subordinada", " - Senior", " - Mezanino",
+                " - Subordinada", " | Sub", " | Classe"]:
         idx = name.upper().find(sep.upper())
         if idx > 0:
             return name[:idx].strip()
@@ -102,14 +120,14 @@ def find_csv_files(
 
 
 def parse_table(
-    csv_files: list[Path], cnpjs: list[str]
+    csv_files: list[Path], cnpjs: list[str], fund_names: list[str] | None = None
 ) -> pd.DataFrame:
     """Parse and concatenate CSV files for a specific table, filtered by CNPJ."""
     frames = []
     for csv_path in csv_files:
         try:
             df = read_csv_file(csv_path)
-            df = filter_by_cnpj(df, cnpjs)
+            df = filter_by_cnpj(df, cnpjs, fund_names=fund_names)
             if not df.empty:
                 frames.append(df)
         except Exception as e:
@@ -136,10 +154,12 @@ def parse_table(
 def parse_all_tables(
     data_dirs: dict[tuple[int, int], list[Path]],
     cnpjs: list[str],
+    fund_names: list[str] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Parse all available tables from downloaded CVM data.
 
     Returns dict mapping table name to filtered DataFrame.
+    fund_names: optional list of fund names for DENOM_SOCIAL fallback filtering.
     Key tables:
       - tab_I: Fund summary (assets, liabilities, PL, quota values)
       - tab_II: Credit rights classification
@@ -166,12 +186,33 @@ def parse_all_tables(
         "tab_X_7",    # Table X.7 - additional quota info
     ]
 
+    # Parse tab_I first to discover fund names for DENOM_SOCIAL fallback
+    discovered_fund_names = list(fund_names) if fund_names else []
+
     tables = {}
+    # Parse tab_I first to extract fund names
+    tab_i_files = find_csv_files(data_dirs, "tab_I_")
+    if tab_i_files:
+        tab_i_df = parse_table(tab_i_files, cnpjs, fund_names=discovered_fund_names or None)
+        if not tab_i_df.empty:
+            tables["tab_I"] = tab_i_df
+            print(f"  Parsed tab_I: {len(tab_i_df)} rows, {len(tab_i_df.columns)} columns")
+            # Extract fund base names for fallback filtering in other tables
+            if "DENOM_SOCIAL" in tab_i_df.columns:
+                for name in tab_i_df["DENOM_SOCIAL"].dropna().unique():
+                    base = _extract_fund_base_name(str(name))
+                    if base and base not in discovered_fund_names:
+                        discovered_fund_names.append(base)
+                print(f"  Discovered fund names for filtering: {discovered_fund_names}")
+
+    # Parse remaining tables using discovered fund names as fallback
     for pattern in table_patterns:
+        if pattern == "tab_I_":
+            continue  # Already parsed
         csv_files = find_csv_files(data_dirs, pattern)
         if csv_files:
             table_name = pattern.rstrip("_")
-            df = parse_table(csv_files, cnpjs)
+            df = parse_table(csv_files, cnpjs, fund_names=discovered_fund_names or None)
             if not df.empty:
                 tables[table_name] = df
                 print(f"  Parsed {table_name}: {len(df)} rows, {len(df.columns)} columns")

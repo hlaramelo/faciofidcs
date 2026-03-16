@@ -128,7 +128,8 @@ def main():
 
     # Step 2: Parse CSVs
     print("\n[2/4] Parsing CSV data...")
-    tables = parse_all_tables(data_dirs, cnpjs)
+    fund_names_list = [f["name"] for f in FUNDS]
+    tables = parse_all_tables(data_dirs, cnpjs, fund_names=fund_names_list)
 
     if not tables:
         print("\nNo data found for the specified fund(s). Verify the CNPJ in config.py.")
