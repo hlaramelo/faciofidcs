@@ -249,26 +249,115 @@ def load_data(start_str: str, end_str: str, cnpj_raw: str, fund_display_name: st
     return kpi_df, tables, per_class, cdi_df
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_consolidated_data(start_str: str, end_str: str):
+    """Load and consolidate KPIs across all Facio funds. Cached for 1 hour."""
+    import numpy as np
+
+    all_kpis = []
+    all_tables = {}
+    cdi_df_out = None
+
+    for fund in FUNDS:
+        result = load_data(start_str, end_str, fund["cnpj_raw"], fund["name"])
+        kpi, tables, per_class, cdi = result
+        if kpi is not None and not kpi.empty:
+            # Tag each row with fund name
+            kpi_copy = kpi.copy()
+            kpi_copy["_fund_name"] = fund["name"]
+            all_kpis.append(kpi_copy)
+        if cdi is not None and not cdi.empty:
+            cdi_df_out = cdi
+
+    if not all_kpis:
+        return None, None, None, cdi_df_out
+
+    combined = pd.concat(all_kpis, ignore_index=True)
+
+    # Aggregate: sum additive columns, weighted-mean rates, per date
+    sum_cols = [c for c in [
+        "PL", "ATIVO_TOTAL", "DC_PERFORMAR", "DC_NAO_PERFORMAR",
+        "AQUISICOES", "RESGATES", "INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO",
+        "SUBSTITUICAO", "NR_COTISTAS",
+    ] if c in combined.columns]
+
+    mean_cols = [c for c in ["VALOR_COTA", "RENTAB_MES"] if c in combined.columns]
+
+    agg_dict = {}
+    for c in sum_cols:
+        agg_dict[c] = "sum"
+    for c in mean_cols:
+        agg_dict[c] = "mean"
+
+    consolidated = combined.groupby("DT_COMPTC", as_index=False).agg(agg_dict)
+    consolidated = consolidated.sort_values("DT_COMPTC").reset_index(drop=True)
+
+    # Recompute derived rate columns after aggregation
+    if "DC_PERFORMAR" in consolidated.columns and "DC_NAO_PERFORMAR" in consolidated.columns:
+        total_dc = consolidated["DC_PERFORMAR"] + consolidated["DC_NAO_PERFORMAR"]
+        consolidated["TAXA_INADIMPLENCIA"] = (
+            consolidated["DC_NAO_PERFORMAR"] / total_dc.replace(0, np.nan) * 100
+        )
+
+    # MoM changes
+    for col in consolidated.select_dtypes(include="number").columns:
+        if col == "TAXA_INADIMPLENCIA":
+            continue
+        consolidated[f"{col}_MoM_%"] = consolidated[col].pct_change(fill_method=None) * 100
+
+    # Build per-fund PL breakdown for consolidated per_class
+    pl_by_fund = combined.pivot_table(
+        index="DT_COMPTC", columns="_fund_name", values="PL", aggfunc="sum",
+    )
+    if not pl_by_fund.empty:
+        pl_by_fund = pl_by_fund.reset_index().sort_values("DT_COMPTC")
+        pl_by_fund.columns = ["DT_COMPTC"] + [f"PL - {c}" for c in pl_by_fund.columns[1:]]
+        cons_per_class = {"pl_por_classe": pl_by_fund}
+    else:
+        cons_per_class = {}
+
+    return consolidated, all_tables, cons_per_class, cdi_df_out
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
+
+CONSOLIDATED_LABEL = "Facio Consolidado"
 
 with st.sidebar:
     st.markdown("### Facio FIDC Monitor")
     st.markdown("---")
 
-    fund_names = [f["name"] for f in FUNDS]
-    selected_fund_name = st.selectbox("Fundo", fund_names)
-    selected_fund = next(f for f in FUNDS if f["name"] == selected_fund_name)
-    fund_name = selected_fund["name"]
-    st.markdown(f"**CNPJ:** {selected_fund['cnpj']}")
-    if selected_fund.get("status"):
-        status_color = "#22c55e" if selected_fund["status"] == "Operacional" else "#f59e0b"
-        st.markdown(f"**Status:** <span style='color:{status_color}'>{selected_fund['status']}</span>", unsafe_allow_html=True)
+    fund_options = [CONSOLIDATED_LABEL] + [f["name"] for f in FUNDS]
+    selected_fund_name = st.selectbox("Fundo", fund_options)
+    is_consolidated = selected_fund_name == CONSOLIDATED_LABEL
+
+    if is_consolidated:
+        selected_fund = None
+        fund_name = CONSOLIDATED_LABEL
+        st.markdown("**Visao consolidada de todos os fundos Facio**")
+        operational = [f for f in FUNDS if f["status"] == "Operacional"]
+        for f in FUNDS:
+            status_color = "#22c55e" if f["status"] == "Operacional" else "#f59e0b"
+            st.markdown(
+                f"<small>{f['name']}: <span style='color:{status_color}'>{f['status']}</span></small>",
+                unsafe_allow_html=True,
+            )
+    else:
+        selected_fund = next(f for f in FUNDS if f["name"] == selected_fund_name)
+        fund_name = selected_fund["name"]
+        st.markdown(f"**CNPJ:** {selected_fund['cnpj']}")
+        if selected_fund.get("status"):
+            status_color = "#22c55e" if selected_fund["status"] == "Operacional" else "#f59e0b"
+            st.markdown(f"**Status:** <span style='color:{status_color}'>{selected_fund['status']}</span>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("##### Periodo de Analise")
 
     today = date.today()
-    fund_start = date.fromisoformat(selected_fund["start_date"])
+    if is_consolidated:
+        fund_start = min(date.fromisoformat(f["start_date"]) for f in FUNDS)
+    else:
+        fund_start = date.fromisoformat(selected_fund["start_date"])
 
     col_s1, col_s2 = st.columns(2)
     with col_s1:
@@ -331,7 +420,10 @@ start_str = start_month.strftime("%Y-%m")
 end_str = end_month.strftime("%Y-%m")
 
 with st.spinner("Carregando dados do CVM..."):
-    kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str, selected_fund["cnpj_raw"], fund_name)
+    if is_consolidated:
+        kpi_df, tables, per_class, cdi_df = load_consolidated_data(start_str, end_str)
+    else:
+        kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str, selected_fund["cnpj_raw"], fund_name)
 
 if kpi_df is None or kpi_df.empty:
     st.error("Nenhum dado disponivel. Verifique a conexao e o periodo selecionado.")
@@ -340,6 +432,7 @@ if kpi_df is None or kpi_df.empty:
 # Force clear cache on refresh button
 if refresh:
     load_data.clear()
+    load_consolidated_data.clear()
     st.rerun()
 
 # ── Compute all analytics ───────────────────────────────────────────────────
