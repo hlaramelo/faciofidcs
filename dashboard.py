@@ -27,6 +27,7 @@ from src.analytics import (
     format_pct,
     get_alert_flags,
 )
+from src.data_cache import clear_cache, is_cache_valid, load_from_cache, save_to_cache
 from src.downloader import download_monthly_zips
 from src.kpi_extractor import compute_trends, extract_kpis, extract_per_class_data
 from src.parser import parse_all_tables
@@ -218,9 +219,8 @@ def styled_area_chart(df, x, y_cols, title, y_format=None, colors=None):
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_data(start_str: str, end_str: str, cnpj_raw: str, fund_display_name: str = ""):
-    """Download, parse, and extract KPIs for a single fund. Cached for 1 hour."""
+def _process_fund_data(start_str: str, end_str: str, cnpj_raw: str, fund_display_name: str = ""):
+    """Download, parse, and extract KPIs for a single fund from CVM source."""
     from datetime import date as d
 
     start_parts = start_str.split("-")
@@ -250,12 +250,30 @@ def load_data(start_str: str, end_str: str, cnpj_raw: str, fund_display_name: st
     cdi_end = f"28/{end_parts[1]}/{end_parts[0]}"
     cdi_df = fetch_cdi_monthly(cdi_start, cdi_end)
 
+    # Save to persistent cache
+    save_to_cache(cnpj_raw, start_str, end_str, kpi_df, tables, per_class, cdi_df)
+
     return kpi_df, tables, per_class, cdi_df
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_consolidated_data(start_str: str, end_str: str):
-    """Load and consolidate KPIs across all Facio funds. Cached for 1 hour."""
+def load_data(start_str: str, end_str: str, cnpj_raw: str, fund_display_name: str = "", force_refresh: bool = False):
+    """Load KPIs for a single fund, using persistent cache when available.
+
+    Data is loaded from parquet cache unless:
+    - force_refresh=True (user clicked Atualizar Dados)
+    - Cache doesn't exist (first run)
+    - Date range changed
+    """
+    if not force_refresh and is_cache_valid(cnpj_raw, start_str, end_str):
+        print(f"  Loading {fund_display_name or cnpj_raw} from cache...")
+        return load_from_cache(cnpj_raw)
+
+    print(f"  Processing {fund_display_name or cnpj_raw} from CVM data...")
+    return _process_fund_data(start_str, end_str, cnpj_raw, fund_display_name)
+
+
+def load_consolidated_data(start_str: str, end_str: str, force_refresh: bool = False):
+    """Load and consolidate KPIs across all Facio funds."""
     import numpy as np
 
     all_kpis = []
@@ -263,7 +281,7 @@ def load_consolidated_data(start_str: str, end_str: str):
     cdi_df_out = None
 
     for fund in FUNDS:
-        result = load_data(start_str, end_str, fund["cnpj_raw"], fund["name"])
+        result = load_data(start_str, end_str, fund["cnpj_raw"], fund["name"], force_refresh=force_refresh)
         kpi, tables, per_class, cdi = result
         if tables:
             for tname, tdf in tables.items():
@@ -486,21 +504,23 @@ with st.sidebar:
 start_str = start_month.strftime("%Y-%m")
 end_str = end_month.strftime("%Y-%m")
 
-with st.spinner("Carregando dados do CVM..."):
+# Determine if this is a force refresh (user clicked "Atualizar Dados")
+force_refresh = refresh
+
+if force_refresh:
+    # Clear persistent cache so data is re-downloaded and re-processed
+    clear_cache()
+
+spinner_msg = "Atualizando dados do CVM..." if force_refresh else "Carregando dados..."
+with st.spinner(spinner_msg):
     if is_consolidated:
-        kpi_df, tables, per_class, cdi_df = load_consolidated_data(start_str, end_str)
+        kpi_df, tables, per_class, cdi_df = load_consolidated_data(start_str, end_str, force_refresh=force_refresh)
     else:
-        kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str, selected_fund["cnpj_raw"], fund_name)
+        kpi_df, tables, per_class, cdi_df = load_data(start_str, end_str, selected_fund["cnpj_raw"], fund_name, force_refresh=force_refresh)
 
 if kpi_df is None or kpi_df.empty:
     st.error("Nenhum dado disponivel. Verifique a conexao e o periodo selecionado.")
     st.stop()
-
-# Force clear cache on refresh button
-if refresh:
-    load_data.clear()
-    load_consolidated_data.clear()
-    st.rerun()
 
 # ── Compute all analytics ───────────────────────────────────────────────────
 

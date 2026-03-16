@@ -6,6 +6,7 @@ from pathlib import Path
 # Project paths
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data" / "raw"
+CACHE_DIR = BASE_DIR / "data" / "cache"
 OUTPUT_DIR = BASE_DIR / "output"
 
 # CVM Open Data Portal
