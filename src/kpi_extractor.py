@@ -307,13 +307,22 @@ def compute_trends(kpi_df: pd.DataFrame) -> pd.DataFrame:
             result["DC_NAO_PERFORMAR"] / total_dc.replace(0, pd.NA) * 100
         )
 
-    # MoM percentage changes
-    numeric_cols = result.select_dtypes(include="number").columns
-    for col in numeric_cols:
-        if col == "TAXA_INADIMPLENCIA":
-            continue  # Skip rate columns for MoM (already a %)
-        pct_col = f"{col}_MoM_%"
-        result[pct_col] = result[col].pct_change(fill_method=None) * 100
+    # MoM percentage changes — only between truly consecutive months
+    if "DT_COMPTC" in result.columns:
+        result = result.sort_values("DT_COMPTC").reset_index(drop=True)
+        dates = pd.to_datetime(result["DT_COMPTC"])
+        # Check if each row is exactly 1 month after the previous
+        month_diff = dates.dt.to_period("M").astype(int).diff()
+        is_consecutive = month_diff == 1
+
+        numeric_cols = result.select_dtypes(include="number").columns
+        for col in numeric_cols:
+            if col == "TAXA_INADIMPLENCIA":
+                continue  # Skip rate columns for MoM (already a %)
+            pct_col = f"{col}_MoM_%"
+            raw_pct = result[col].pct_change(fill_method=None) * 100
+            # Null out MoM where months aren't consecutive
+            result[pct_col] = raw_pct.where(is_consecutive)
 
     return result
 

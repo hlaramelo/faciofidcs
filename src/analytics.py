@@ -131,6 +131,44 @@ def compute_flow_metrics(kpi_df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def compute_pl_waterfall(kpi_df: pd.DataFrame) -> pd.DataFrame | None:
+    """Decompose PL changes into contributing factors.
+
+    Returns DataFrame with columns: DT_COMPTC, PL_Change, Rendimentos,
+    Aquisicoes, Resgates, Inadimplencia, Outros.
+    """
+    if "PL" not in kpi_df.columns or len(kpi_df) < 2:
+        return None
+
+    result = kpi_df[["DT_COMPTC"]].copy()
+    result["PL"] = kpi_df["PL"]
+    result["PL_Anterior"] = kpi_df["PL"].shift(1)
+    result["Variacao_PL"] = result["PL"] - result["PL_Anterior"]
+
+    # Decompose into known drivers
+    result["Rendimentos"] = np.nan
+    if "RENTAB_MES" in kpi_df.columns:
+        # Estimated return: previous PL * monthly return %
+        result["Rendimentos"] = result["PL_Anterior"] * kpi_df["RENTAB_MES"].fillna(0) / 100
+
+    result["Aquisicoes"] = kpi_df.get("AQUISICOES", pd.Series(dtype=float)).fillna(0).values
+    result["Resgates"] = -kpi_df.get("RESGATES", pd.Series(dtype=float)).fillna(0).abs().values
+    result["Inadimplencia"] = -kpi_df.get("INADIMPLENCIA_VL", pd.Series(dtype=float)).fillna(0).abs().values
+
+    # "Outros" = total change minus known factors
+    known = result["Rendimentos"].fillna(0) + result["Aquisicoes"] + result["Resgates"] + result["Inadimplencia"]
+    result["Outros"] = result["Variacao_PL"] - known
+
+    # Drop first row (no previous PL)
+    result = result.iloc[1:].reset_index(drop=True)
+
+    # Only return if we have some meaningful data
+    if result["Variacao_PL"].isna().all():
+        return None
+
+    return result
+
+
 def compute_performance_metrics(
     kpi_df: pd.DataFrame,
     per_class: dict[str, pd.DataFrame],
@@ -406,6 +444,56 @@ def compute_data_quality(kpi_df: pd.DataFrame, tables: dict[str, pd.DataFrame]) 
             if missing_count > len(available) * 0.3:
                 months_with_gaps.append(row["DT_COMPTC"])
 
+    # Detect data anomalies
+    anomalies = []
+    if "PL" in kpi_df.columns:
+        neg_pl = kpi_df[kpi_df["PL"] < 0]
+        if not neg_pl.empty:
+            dates = neg_pl["DT_COMPTC"].dt.strftime("%Y-%m").tolist()
+            anomalies.append(f"PL negativo em {', '.join(dates)}")
+
+    if "TAXA_INADIMPLENCIA" in kpi_df.columns:
+        over100 = kpi_df[kpi_df["TAXA_INADIMPLENCIA"] > 100]
+        if not over100.empty:
+            dates = over100["DT_COMPTC"].dt.strftime("%Y-%m").tolist()
+            anomalies.append(f"Inadimplencia > 100% em {', '.join(dates)}")
+
+    if "VALOR_COTA" in kpi_df.columns:
+        neg_cota = kpi_df[kpi_df["VALOR_COTA"] < 0]
+        if not neg_cota.empty:
+            dates = neg_cota["DT_COMPTC"].dt.strftime("%Y-%m").tolist()
+            anomalies.append(f"Valor da cota negativo em {', '.join(dates)}")
+
+    if "RENTAB_MES" in kpi_df.columns:
+        extreme = kpi_df[kpi_df["RENTAB_MES"].abs() > 50]
+        if not extreme.empty:
+            dates = extreme["DT_COMPTC"].dt.strftime("%Y-%m").tolist()
+            anomalies.append(f"Rentabilidade mensal > 50% em {', '.join(dates)}")
+
+    if "NR_COTISTAS" in kpi_df.columns:
+        nr = kpi_df["NR_COTISTAS"].dropna()
+        if len(nr) >= 3:
+            # Flag if cotistas count changes by more than 5x in one month
+            ratio = nr / nr.shift(1)
+            spikes = ratio[(ratio > 5) | (ratio < 0.2)].dropna()
+            if not spikes.empty:
+                spike_dates = kpi_df.loc[spikes.index, "DT_COMPTC"].dt.strftime("%Y-%m").tolist()
+                anomalies.append(f"Variacao brusca de cotistas em {', '.join(spike_dates)}")
+
+    # Detect month gaps in the time series
+    date_gaps = []
+    if "DT_COMPTC" in kpi_df.columns and len(kpi_df) >= 2:
+        dates = pd.to_datetime(kpi_df["DT_COMPTC"]).sort_values()
+        periods = dates.dt.to_period("M").astype(int)
+        diffs = periods.diff().dropna()
+        gap_mask = diffs > 1
+        if gap_mask.any():
+            for idx in diffs[gap_mask].index:
+                gap_start = dates.iloc[dates.index.get_loc(idx) - 1].strftime("%Y-%m")
+                gap_end = dates.loc[idx].strftime("%Y-%m")
+                gap_months = int(diffs.loc[idx]) - 1
+                date_gaps.append(f"{gap_start} → {gap_end} ({gap_months} meses sem dados)")
+
     return {
         "completeness_pct": completeness,
         "missing_kpis": missing,
@@ -413,6 +501,8 @@ def compute_data_quality(kpi_df: pd.DataFrame, tables: dict[str, pd.DataFrame]) 
         "months_with_gaps": months_with_gaps,
         "total_months": len(kpi_df),
         "total_tables": len(tables) if tables else 0,
+        "anomalies": anomalies,
+        "date_gaps": date_gaps,
     }
 
 

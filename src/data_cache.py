@@ -7,14 +7,13 @@ re-parse all CSVs every time the dashboard loads. Only re-processes when:
   3. Cache files don't exist yet (first run)
 """
 
-import hashlib
 import json
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
-from config import CACHE_DIR
+from config import CACHE_DIR, DATA_DIR
 
 
 def _fund_cache_dir(cnpj_raw: str) -> Path:
@@ -52,6 +51,24 @@ def is_cache_valid(cnpj_raw: str, start_str: str, end_str: str) -> bool:
         and meta.get("end") == end_str
         and (_fund_cache_dir(cnpj_raw) / "kpi_df.parquet").exists()
     )
+
+
+def needs_incremental_update(cnpj_raw: str, start_str: str, end_str: str) -> bool:
+    """Check if cache exists but the end date extended (new months available)."""
+    meta = _read_meta(cnpj_raw)
+    if not meta:
+        return False
+    return (
+        meta.get("start") == start_str
+        and meta.get("end") != end_str
+        and (_fund_cache_dir(cnpj_raw) / "kpi_df.parquet").exists()
+    )
+
+
+def get_cached_end(cnpj_raw: str) -> str | None:
+    """Return the cached end date string, or None."""
+    meta = _read_meta(cnpj_raw)
+    return meta.get("end")
 
 
 def load_from_cache(cnpj_raw: str) -> tuple:
@@ -145,3 +162,13 @@ def clear_cache(cnpj_raw: str | None = None):
             shutil.rmtree(CACHE_DIR)
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             print("  All cache cleared")
+
+
+def clear_raw_months(months_to_clear: list[tuple[int, int]]):
+    """Delete raw CSV directories for specific months to force re-download."""
+    for year, month in months_to_clear:
+        raw_dir = DATA_DIR / f"{year}{month:02d}"
+        if raw_dir.exists():
+            import shutil
+            shutil.rmtree(raw_dir)
+            print(f"  Cleared raw data for {year}-{month:02d}")

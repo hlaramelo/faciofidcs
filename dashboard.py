@@ -21,13 +21,21 @@ from src.analytics import (
     compute_data_quality,
     compute_flow_metrics,
     compute_performance_metrics,
+    compute_pl_waterfall,
     compute_subordination_ratios,
     fetch_cdi_monthly,
     format_brl,
     format_pct,
     get_alert_flags,
 )
-from src.data_cache import clear_cache, is_cache_valid, load_from_cache, save_to_cache
+from src.data_cache import (
+    clear_cache,
+    clear_raw_months,
+    is_cache_valid,
+    load_from_cache,
+    needs_incremental_update,
+    save_to_cache,
+)
 from src.downloader import download_monthly_zips
 from src.kpi_extractor import compute_trends, extract_kpis, extract_per_class_data
 from src.parser import parse_all_tables
@@ -353,11 +361,16 @@ def load_consolidated_data(start_str: str, end_str: str, force_refresh: bool = F
             consolidated["DC_NAO_PERFORMAR"] / total_dc.replace(0, np.nan) * 100
         )
 
-    # MoM changes
+    # MoM changes — only between consecutive months
+    consolidated = consolidated.sort_values("DT_COMPTC").reset_index(drop=True)
+    cons_dates = pd.to_datetime(consolidated["DT_COMPTC"])
+    cons_month_diff = cons_dates.dt.to_period("M").astype(int).diff()
+    cons_is_consecutive = cons_month_diff == 1
     for col in consolidated.select_dtypes(include="number").columns:
         if col == "TAXA_INADIMPLENCIA":
             continue
-        consolidated[f"{col}_MoM_%"] = consolidated[col].pct_change(fill_method=None) * 100
+        raw_pct = consolidated[col].pct_change(fill_method=None) * 100
+        consolidated[f"{col}_MoM_%"] = raw_pct.where(cons_is_consecutive)
 
     # Build per-fund breakdowns for consolidated per_class
     cons_per_class = {}
@@ -508,7 +521,17 @@ end_str = end_month.strftime("%Y-%m")
 force_refresh = refresh
 
 if force_refresh:
-    # Clear persistent cache so data is re-downloaded and re-processed
+    # Incremental refresh: only clear the last 2 months of raw data (may have updates)
+    # and clear all processed caches so they get re-built
+    from datetime import datetime
+    end_parts = end_str.split("-")
+    end_y, end_m = int(end_parts[0]), int(end_parts[1])
+    months_to_redownload = [(end_y, end_m)]
+    # Also re-download previous month (CVM may publish corrections)
+    prev_m = end_m - 1 if end_m > 1 else 12
+    prev_y = end_y if end_m > 1 else end_y - 1
+    months_to_redownload.append((prev_y, prev_m))
+    clear_raw_months(months_to_redownload)
     clear_cache()
 
 spinner_msg = "Atualizando dados do CVM..." if force_refresh else "Carregando dados..."
@@ -530,6 +553,7 @@ flow_metrics = compute_flow_metrics(kpi_df)
 perf_metrics = compute_performance_metrics(kpi_df, per_class)
 sub_ratios = compute_subordination_ratios(per_class)
 spread_metrics = compute_cdi_spread(perf_metrics, cdi_df)
+pl_waterfall = compute_pl_waterfall(kpi_df)
 data_quality = compute_data_quality(kpi_df, tables)
 
 # Pass custom thresholds to alert function
@@ -570,6 +594,12 @@ st.markdown(
 )
 if data_quality["missing_kpis"]:
     st.caption(f"KPIs indisponiveis: {', '.join(data_quality['missing_kpis'])}")
+if data_quality.get("date_gaps"):
+    for gap in data_quality["date_gaps"]:
+        st.caption(f"Gap de dados: {gap}")
+if data_quality.get("anomalies"):
+    for anomaly in data_quality["anomalies"]:
+        st.warning(f"Anomalia detectada: {anomaly}")
 
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
@@ -710,6 +740,42 @@ with tab_overview:
                 colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
             )
             st.plotly_chart(fig, width="stretch", key="overview_cota")
+
+    # Row 5: PL Waterfall chart
+    if pl_waterfall is not None and not pl_waterfall.empty:
+        st.markdown("")
+        # Show last 12 months max for readability
+        wf = pl_waterfall.tail(12).copy()
+        wf["date_label"] = pd.to_datetime(wf["DT_COMPTC"]).dt.strftime("%b/%Y")
+
+        fig = go.Figure()
+        components = [
+            ("Rendimentos", COLORS["success"]),
+            ("Aquisicoes", COLORS["primary"]),
+            ("Resgates", COLORS["danger"]),
+            ("Inadimplencia", COLORS["warning"]),
+            ("Outros", COLORS["muted"]),
+        ]
+        for comp_name, color in components:
+            if comp_name in wf.columns and wf[comp_name].notna().any():
+                fig.add_trace(go.Bar(
+                    x=wf["date_label"], y=wf[comp_name],
+                    name=comp_name, marker_color=color, opacity=0.85,
+                ))
+        # Add net PL change as a line
+        fig.add_trace(go.Scatter(
+            x=wf["date_label"], y=wf["Variacao_PL"],
+            name="Variacao PL", mode="lines+markers",
+            line=dict(color="#1e293b", width=2.5),
+            marker=dict(size=6),
+        ))
+        fig.update_layout(
+            **CHART_LAYOUT,
+            title="Decomposicao da Variacao do PL",
+            barmode="relative",
+        )
+        fig.update_yaxes(tickformat=",.0f", tickprefix="R$ ")
+        st.plotly_chart(fig, width="stretch", key="overview_waterfall")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
