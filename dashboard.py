@@ -140,8 +140,8 @@ CHART_LAYOUT = dict(
     template="plotly_white",
     font=dict(family="Inter, system-ui, sans-serif", size=12, color="#334155"),
     title_font=dict(size=15, color="#1e293b"),
-    legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
-    margin=dict(l=40, r=20, t=50, b=40),
+    legend=dict(orientation="h", yanchor="top", y=-0.35, xanchor="center", x=0.5),
+    margin=dict(l=40, r=20, t=50, b=80),
     hovermode="x unified",
     plot_bgcolor="rgba(0,0,0,0)",
     paper_bgcolor="rgba(0,0,0,0)",
@@ -152,11 +152,15 @@ def styled_line_chart(df, x, y_cols, title, y_format=None, colors=None):
     """Create a clean line chart."""
     fig = go.Figure()
     palette = colors or [COLORS["primary"], COLORS["warning"], COLORS["danger"], COLORS["info"]]
-    for i, col in enumerate(y_cols):
-        if col not in df.columns:
-            continue
+    valid_cols = [c for c in y_cols if c in df.columns]
+    # Filter to rows where at least one y column has data
+    if valid_cols:
+        plot_df = df.dropna(subset=valid_cols, how="all")
+    else:
+        plot_df = df
+    for i, col in enumerate(valid_cols):
         fig.add_trace(go.Scatter(
-            x=df[x], y=df[col], name=col, mode="lines+markers",
+            x=plot_df[x], y=plot_df[col], name=col, mode="lines+markers",
             line=dict(color=palette[i % len(palette)], width=2.5),
             marker=dict(size=5),
         ))
@@ -173,11 +177,11 @@ def styled_bar_chart(df, x, y_cols, title, y_format=None, colors=None, barmode="
     """Create a clean bar chart."""
     fig = go.Figure()
     palette = colors or [COLORS["primary"], COLORS["success"], COLORS["danger"], COLORS["warning"]]
-    for i, col in enumerate(y_cols):
-        if col not in df.columns:
-            continue
+    valid_cols = [c for c in y_cols if c in df.columns]
+    plot_df = df.dropna(subset=valid_cols, how="all") if valid_cols else df
+    for i, col in enumerate(valid_cols):
         fig.add_trace(go.Bar(
-            x=df[x], y=df[col], name=col,
+            x=plot_df[x], y=plot_df[col], name=col,
             marker_color=palette[i % len(palette)],
             opacity=0.9,
         ))
@@ -191,17 +195,17 @@ def styled_bar_chart(df, x, y_cols, title, y_format=None, colors=None, barmode="
 
 
 def styled_area_chart(df, x, y_cols, title, y_format=None, colors=None):
-    """Create a clean stacked area chart."""
+    """Create a clean stacked area chart with stackgroup for proper stacking."""
     fig = go.Figure()
     palette = colors or [COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]]
-    for i, col in enumerate(y_cols):
-        if col not in df.columns:
-            continue
+    valid_cols = [c for c in y_cols if c in df.columns]
+    plot_df = df.dropna(subset=valid_cols, how="all") if valid_cols else df
+    for i, col in enumerate(valid_cols):
         fig.add_trace(go.Scatter(
-            x=df[x], y=df[col], name=col, mode="lines",
-            fill="tonexty" if i > 0 else "tozeroy",
+            x=plot_df[x], y=plot_df[col].fillna(0), name=col, mode="lines",
+            stackgroup="one",
             line=dict(color=palette[i % len(palette)], width=1),
-            fillcolor=_hex_to_rgba(palette[i % len(palette)], 0.25),
+            fillcolor=_hex_to_rgba(palette[i % len(palette)], 0.4),
         ))
     fig.update_layout(**CHART_LAYOUT, title=title)
     if y_format == "brl":
@@ -274,23 +278,51 @@ def load_consolidated_data(start_str: str, end_str: str):
 
     combined = pd.concat(all_kpis, ignore_index=True)
 
-    # Aggregate: sum additive columns, weighted-mean rates, per date
+    # Aggregate: sum additive columns, per date
     sum_cols = [c for c in [
         "PL", "ATIVO_TOTAL", "DC_PERFORMAR", "DC_NAO_PERFORMAR",
         "AQUISICOES", "RESGATES", "INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO",
-        "SUBSTITUICAO", "NR_COTISTAS",
+        "SUBSTITUICAO",
     ] if c in combined.columns]
 
-    mean_cols = [c for c in ["VALOR_COTA", "RENTAB_MES"] if c in combined.columns]
+    # NR_COTISTAS: sum across funds (each fund contributes its own cotistas)
+    nr_sum_cols = [c for c in ["NR_COTISTAS"] if c in combined.columns]
 
     agg_dict = {}
     for c in sum_cols:
         agg_dict[c] = "sum"
-    for c in mean_cols:
-        agg_dict[c] = "mean"
+    for c in nr_sum_cols:
+        agg_dict[c] = "sum"
+    # VALOR_COTA: not meaningful to average across funds with different cota values
+    # RENTAB_MES: compute PL-weighted average below instead of simple mean
 
     consolidated = combined.groupby("DT_COMPTC", as_index=False).agg(agg_dict)
     consolidated = consolidated.sort_values("DT_COMPTC").reset_index(drop=True)
+
+    # Compute PL-weighted RENTAB_MES for consolidated view
+    if "RENTAB_MES" in combined.columns and "PL" in combined.columns:
+        def _weighted_mean_rentab(group):
+            valid = group.dropna(subset=["RENTAB_MES", "PL"])
+            if valid.empty or valid["PL"].sum() == 0:
+                return np.nan
+            return (valid["RENTAB_MES"] * valid["PL"]).sum() / valid["PL"].sum()
+        wm = combined.groupby("DT_COMPTC").apply(_weighted_mean_rentab).reset_index()
+        wm.columns = ["DT_COMPTC", "RENTAB_MES"]
+        consolidated = consolidated.merge(wm, on="DT_COMPTC", how="left")
+    elif "RENTAB_MES" in combined.columns:
+        rm = combined.groupby("DT_COMPTC")["RENTAB_MES"].mean().reset_index()
+        consolidated = consolidated.merge(rm, on="DT_COMPTC", how="left")
+
+    # VALOR_COTA: use PL-weighted average (funds with higher PL weigh more)
+    if "VALOR_COTA" in combined.columns and "PL" in combined.columns:
+        def _weighted_mean_cota(group):
+            valid = group.dropna(subset=["VALOR_COTA", "PL"])
+            if valid.empty or valid["PL"].sum() == 0:
+                return np.nan
+            return (valid["VALOR_COTA"] * valid["PL"]).sum() / valid["PL"].sum()
+        wc = combined.groupby("DT_COMPTC").apply(_weighted_mean_cota).reset_index()
+        wc.columns = ["DT_COMPTC", "VALOR_COTA"]
+        consolidated = consolidated.merge(wc, on="DT_COMPTC", how="left")
 
     # Recompute derived rate columns after aggregation
     if "DC_PERFORMAR" in consolidated.columns and "DC_NAO_PERFORMAR" in consolidated.columns:
@@ -305,16 +337,47 @@ def load_consolidated_data(start_str: str, end_str: str):
             continue
         consolidated[f"{col}_MoM_%"] = consolidated[col].pct_change(fill_method=None) * 100
 
-    # Build per-fund PL breakdown for consolidated per_class
+    # Build per-fund breakdowns for consolidated per_class
+    cons_per_class = {}
+
+    # PL by fund
     pl_by_fund = combined.pivot_table(
         index="DT_COMPTC", columns="_fund_name", values="PL", aggfunc="sum",
     )
     if not pl_by_fund.empty:
         pl_by_fund = pl_by_fund.reset_index().sort_values("DT_COMPTC")
         pl_by_fund.columns = ["DT_COMPTC"] + [f"PL - {c}" for c in pl_by_fund.columns[1:]]
-        cons_per_class = {"pl_por_classe": pl_by_fund}
-    else:
-        cons_per_class = {}
+        cons_per_class["pl_por_classe"] = pl_by_fund
+
+    # Cota by fund (each fund has its own cota value)
+    if "VALOR_COTA" in combined.columns:
+        cota_by_fund = combined.pivot_table(
+            index="DT_COMPTC", columns="_fund_name", values="VALOR_COTA", aggfunc="mean",
+        )
+        if not cota_by_fund.empty:
+            cota_by_fund = cota_by_fund.reset_index().sort_values("DT_COMPTC")
+            cota_by_fund.columns = ["DT_COMPTC"] + [f"Cota - {c}" for c in cota_by_fund.columns[1:]]
+            cons_per_class["cota_por_classe"] = cota_by_fund
+
+    # Rentabilidade by fund
+    if "RENTAB_MES" in combined.columns:
+        rentab_by_fund = combined.pivot_table(
+            index="DT_COMPTC", columns="_fund_name", values="RENTAB_MES", aggfunc="mean",
+        )
+        if not rentab_by_fund.empty:
+            rentab_by_fund = rentab_by_fund.reset_index().sort_values("DT_COMPTC")
+            rentab_by_fund.columns = ["DT_COMPTC"] + [f"Rentab - {c}" for c in rentab_by_fund.columns[1:]]
+            cons_per_class["rentab_por_fundo"] = rentab_by_fund
+
+    # Cotistas by fund
+    if "NR_COTISTAS" in combined.columns:
+        cotistas_by_fund = combined.pivot_table(
+            index="DT_COMPTC", columns="_fund_name", values="NR_COTISTAS", aggfunc="sum",
+        )
+        if not cotistas_by_fund.empty:
+            cotistas_by_fund = cotistas_by_fund.reset_index().sort_values("DT_COMPTC")
+            cotistas_by_fund.columns = ["DT_COMPTC"] + [f"Cotistas - {c}" for c in cotistas_by_fund.columns[1:]]
+            cons_per_class["cotistas_por_classe"] = cotistas_by_fund
 
     return consolidated, all_tables, cons_per_class, cdi_df_out
 
@@ -568,11 +631,18 @@ with tab_overview:
         pl_df = per_class.get("pl_por_classe")
         if pl_df is not None and not pl_df.empty:
             pl_cols = [c for c in pl_df.columns if c != "DT_COMPTC"]
-            fig = styled_line_chart(
-                pl_df, "DT_COMPTC", pl_cols,
-                "Patrimonio Liquido por Classe", y_format="brl",
-                colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
-            )
+            if is_consolidated:
+                fig = styled_area_chart(
+                    pl_df, "DT_COMPTC", pl_cols,
+                    "Patrimonio Liquido por Fundo", y_format="brl",
+                    colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+                )
+            else:
+                fig = styled_line_chart(
+                    pl_df, "DT_COMPTC", pl_cols,
+                    "Patrimonio Liquido por Classe", y_format="brl",
+                    colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+                )
             st.plotly_chart(fig, width="stretch", key="overview_pl")
         elif "PL" in perf_metrics.columns:
             fig = styled_line_chart(
@@ -582,13 +652,15 @@ with tab_overview:
             st.plotly_chart(fig, width="stretch", key="overview_pl")
 
     with col_right:
-        if "Taxa_Inadimplencia_%" in credit_quality.columns:
+        if "Taxa_Inadimplencia_%" in credit_quality.columns and credit_quality["Taxa_Inadimplencia_%"].notna().any():
             fig = styled_line_chart(
                 credit_quality, "DT_COMPTC", ["Taxa_Inadimplencia_%"],
                 "Taxa de Inadimplencia", y_format="pct",
                 colors=[COLORS["danger"]],
             )
             st.plotly_chart(fig, width="stretch", key="overview_inadimplencia")
+        else:
+            st.info("Dados de inadimplencia nao disponiveis para este periodo.")
 
     # Subordination + Quota in second row
     col_left2, col_right2 = st.columns(2)
@@ -642,13 +714,15 @@ with tab_credit:
 
     with col1:
         # Default rate evolution
-        if "Taxa_Inadimplencia_%" in credit_quality.columns:
+        if "Taxa_Inadimplencia_%" in credit_quality.columns and credit_quality["Taxa_Inadimplencia_%"].notna().any():
             fig = styled_line_chart(
                 credit_quality, "DT_COMPTC", ["Taxa_Inadimplencia_%"],
                 "Evolucao da Taxa de Inadimplencia", y_format="pct",
                 colors=[COLORS["danger"]],
             )
             st.plotly_chart(fig, width="stretch", key="credit_inadimplencia")
+        else:
+            st.info("Dados de inadimplencia nao disponiveis para este periodo.")
 
     with col2:
         # Performing vs Non-performing
@@ -885,10 +959,28 @@ with tab_performance:
 
     with col3:
         # Rentabilidade vs CDI benchmark (monthly)
-        if "Rentabilidade_%" in perf_metrics.columns:
+        # For consolidated view, show per-fund breakdown
+        rentab_per_fund = per_class.get("rentab_por_fundo") if is_consolidated else None
+        if rentab_per_fund is not None and not rentab_per_fund.empty:
+            rentab_cols = [c for c in rentab_per_fund.columns if c != "DT_COMPTC"]
+            fig = styled_line_chart(
+                rentab_per_fund, "DT_COMPTC", rentab_cols,
+                "Rentabilidade Mensal (%)", y_format="pct",
+            )
+            if cdi_ok and not spread_metrics.empty and "CDI_%" in spread_metrics.columns:
+                fig.add_trace(go.Scatter(
+                    x=spread_metrics["DT_COMPTC"], y=spread_metrics["CDI_%"],
+                    name="CDI", mode="lines+markers",
+                    line=dict(color=COLORS["muted"], width=2, dash="dot"),
+                    marker=dict(size=4),
+                ))
+            st.plotly_chart(fig, width="stretch", key="perf_rentab")
+        elif "Rentabilidade_%" in perf_metrics.columns:
             fig = go.Figure()
+            # Filter out NaN rentabilidade
+            rentab_data = perf_metrics.dropna(subset=["Rentabilidade_%"])
             fig.add_trace(go.Bar(
-                x=perf_metrics["DT_COMPTC"], y=perf_metrics["Rentabilidade_%"],
+                x=rentab_data["DT_COMPTC"], y=rentab_data["Rentabilidade_%"],
                 name="Fundo", marker_color=COLORS["success"], opacity=0.9,
             ))
             if cdi_ok and not spread_metrics.empty and "CDI_%" in spread_metrics.columns:
@@ -907,11 +999,18 @@ with tab_performance:
         pl_df = per_class.get("pl_por_classe")
         if pl_df is not None and not pl_df.empty:
             pl_cols = [c for c in pl_df.columns if c != "DT_COMPTC"]
-            fig = styled_line_chart(
-                pl_df, "DT_COMPTC", pl_cols,
-                "PL por Classe", y_format="brl",
-                colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
-            )
+            if is_consolidated:
+                fig = styled_area_chart(
+                    pl_df, "DT_COMPTC", pl_cols,
+                    "PL por Fundo", y_format="brl",
+                    colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+                )
+            else:
+                fig = styled_line_chart(
+                    pl_df, "DT_COMPTC", pl_cols,
+                    "PL por Classe", y_format="brl",
+                    colors=[COLORS["senior"], COLORS["mezanino"], COLORS["subordinada"]],
+                )
             st.plotly_chart(fig, width="stretch", key="perf_pl")
         elif "PL" in perf_metrics.columns:
             fig = styled_area_chart(
@@ -977,7 +1076,7 @@ with tab_performance:
             st.info("Indice de subordinacao: dados por classe nao disponiveis.")
 
     with col8:
-        if "Taxa_Inadimplencia_%" in credit_quality.columns:
+        if "Taxa_Inadimplencia_%" in credit_quality.columns and credit_quality["Taxa_Inadimplencia_%"].notna().any():
             fig = styled_line_chart(
                 credit_quality, "DT_COMPTC", ["Taxa_Inadimplencia_%"],
                 "Taxa de Inadimplencia", y_format="pct",

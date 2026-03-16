@@ -200,8 +200,12 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         sum_cols = [c for c in numeric_cols if c in (
             "PL", "ATIVO_TOTAL", "DC_PERFORMAR", "DC_NAO_PERFORMAR",
             "AQUISICOES", "RESGATES", "INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO",
-            "SUBSTITUICAO", "NR_COTISTAS",
+            "SUBSTITUICAO",
         )]
+        # NR_COTISTAS: use max, not sum — each class row reports the same
+        # fund-level total or a class-level count that shouldn't be summed
+        # (cotistas may hold multiple classes, summing double-counts)
+        max_cols = [c for c in numeric_cols if c in ("NR_COTISTAS",)]
         mean_cols = [c for c in numeric_cols if c in (
             "VALOR_COTA", "RENTAB_MES",
         )]
@@ -209,6 +213,8 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         agg_dict = {}
         for c in sum_cols:
             agg_dict[c] = "sum"
+        for c in max_cols:
+            agg_dict[c] = "max"
         for c in mean_cols:
             agg_dict[c] = "mean"
         # Any remaining numeric columns default to first
@@ -226,11 +232,14 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if tab_x1 is not None and "DT_COMPTC" in tab_x1.columns:
             cotst_cols = [c for c in tab_x1.columns if re.search(r"NR_COTST", c, re.IGNORECASE)]
             if cotst_cols:
-                # Sum all NR_COTST breakdown columns (PF, PJ, etc.) per date
+                # Sum NR_COTST breakdown columns (PF, PJ, etc.) within each row,
+                # then take the MAX across class rows per date to avoid double-counting
                 tab_x1_numeric = tab_x1[["DT_COMPTC"]].copy()
                 for c in cotst_cols:
                     tab_x1_numeric[c] = pd.to_numeric(tab_x1[c], errors="coerce")
-                nr_total = tab_x1_numeric.groupby("DT_COMPTC")[cotst_cols].sum().sum(axis=1).reset_index()
+                # Sum breakdown columns per row (PF + PJ + ...), then max per date
+                tab_x1_numeric["_nr_total_row"] = tab_x1_numeric[cotst_cols].sum(axis=1)
+                nr_total = tab_x1_numeric.groupby("DT_COMPTC")["_nr_total_row"].max().reset_index()
                 nr_total.columns = ["DT_COMPTC", "NR_COTISTAS"]
                 # Merge into kpi_df
                 if "NR_COTISTAS" in kpi_df.columns:
@@ -288,6 +297,7 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
         value_patterns=[r"VL_PATRIM_LIQ", r"TAB_IV.*PATRIM", r"TAB_IV.*VL_PL",
                         r"TAB_I2.*PATRIM", r"VL_PL"],
         label="PL",
+        agg_func="sum",
     )
     if pl_class_df is not None:
         result["pl_por_classe"] = pl_class_df
@@ -300,6 +310,7 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
         value_patterns=[r"TAB_I2C5_VL_COTA", r"VL_COTA",
                         r"TAB_X_VL_COTA", r"TAB_X.*VL_COTA\b"],
         label="Cota",
+        agg_func="mean",
     )
     if cota_class_df is not None:
         result["cota_por_classe"] = cota_class_df
@@ -311,6 +322,7 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
         value_patterns=[r"NR_COTST", r"NR_COTISTAS", r"QT_COTST",
                         r"QT_COTISTAS", r"TAB_X.*NR_COTST"],
         label="Cotistas",
+        agg_func="max",
     )
     if nr_class_df is not None:
         result["cotistas_por_classe"] = nr_class_df
@@ -349,6 +361,7 @@ def _pivot_by_class(
     table_priority: list[str],
     value_patterns: list[str],
     label: str,
+    agg_func: str = "sum",
 ) -> pd.DataFrame | None:
     """Pivot a table by class, producing one column per class over time.
 
@@ -419,7 +432,7 @@ def _pivot_by_class(
             index="DT_COMPTC",
             columns="_classe_grupo",
             values=value_col,
-            aggfunc="mean",  # Average if multiple subclasses in same group/month
+            aggfunc=agg_func,
         )
 
         if pivoted.empty or pivoted.columns.empty:

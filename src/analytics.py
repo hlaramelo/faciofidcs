@@ -76,6 +76,7 @@ def compute_credit_quality_metrics(kpi_df: pd.DataFrame) -> pd.DataFrame:
     - Credit portfolio composition
     """
     result = kpi_df[["DT_COMPTC"]].copy()
+    result["DT_COMPTC"] = pd.to_datetime(result["DT_COMPTC"], errors="coerce")
 
     perf = kpi_df.get("DC_PERFORMAR")
     non_perf = kpi_df.get("DC_NAO_PERFORMAR")
