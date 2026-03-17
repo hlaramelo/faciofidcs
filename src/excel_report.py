@@ -390,14 +390,187 @@ def write_raw_data_sheet(wb: Workbook, tables: dict[str, pd.DataFrame]):
         auto_column_width(ws)
 
 
+def write_analytics_sheet(
+    wb: Workbook,
+    df: pd.DataFrame,
+    sheet_name: str,
+    chart_title: str,
+    chart_cols: list[str] | None = None,
+    chart_type: str = "line",
+):
+    """Create a sheet from an analytics DataFrame with auto-formatted data and chart.
+
+    This is similar to write_time_series_sheet but works with analytics DataFrames
+    that have descriptive column names (not raw CVM names).
+    """
+    ws = wb.create_sheet(title=sheet_name[:31])
+
+    if df is None or df.empty:
+        ws["A1"] = "Sem dados disponiveis"
+        return
+
+    # Determine columns to display
+    display_cols = [c for c in df.columns if c != "_year"]
+    if not display_cols:
+        ws["A1"] = "Sem dados disponiveis"
+        return
+
+    # Determine which columns to chart
+    if chart_cols:
+        chart_value_cols = [c for c in chart_cols if c in df.columns and c != "DT_COMPTC"]
+    else:
+        chart_value_cols = [c for c in display_cols if c != "DT_COMPTC"]
+
+    # Skip if all chart columns are entirely NaN
+    if chart_value_cols and df[chart_value_cols].isna().all().all():
+        ws["A1"] = "Sem dados disponiveis para este indicador"
+        return
+
+    subset = df[display_cols].copy()
+    if "DT_COMPTC" in subset.columns:
+        subset["DT_COMPTC"] = pd.to_datetime(subset["DT_COMPTC"], errors="coerce").dt.strftime("%Y-%m")
+
+    # Headers
+    for col_idx, col_name in enumerate(display_cols, 1):
+        ws.cell(row=1, column=col_idx, value=col_name)
+    style_header_row(ws, 1, len(display_cols))
+
+    # Detect percentage columns
+    pct_keywords = {"%", "PCT", "TAXA", "RENTAB", "SPREAD", "SHARPE", "VOL", "SUBORDIN"}
+
+    # Data rows
+    for row_idx, (_, data_row) in enumerate(subset.iterrows(), 2):
+        for col_idx, col_name in enumerate(display_cols, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=data_row[col_name])
+            cell.border = THIN_BORDER
+            if col_idx > 1 and isinstance(cell.value, (int, float)):
+                col_upper = col_name.upper()
+                if any(kw in col_upper for kw in pct_keywords):
+                    cell.number_format = '0.00"%"'
+                elif "NR_" in col_upper or "COTIST" in col_upper:
+                    cell.number_format = INTEGER_FORMAT
+                elif "COMPLIANT" in col_upper or col_name in ("True", "False"):
+                    pass  # Leave as-is for booleans
+                else:
+                    cell.number_format = BRL_FORMAT
+
+    num_data_rows = len(subset)
+    auto_column_width(ws)
+
+    if num_data_rows < 2 or not chart_value_cols:
+        ws.freeze_panes = "A2"
+        return
+
+    # Create chart
+    chart = _create_styled_chart(chart_type, chart_title)
+
+    # Categories (dates)
+    cats = Reference(ws, min_col=1, min_row=2, max_row=1 + num_data_rows)
+    chart.set_categories(cats)
+
+    # Data series — only chart the specified columns
+    for col_name in chart_value_cols:
+        if col_name in display_cols:
+            col_idx = display_cols.index(col_name) + 1
+            data = Reference(ws, min_col=col_idx, min_row=1, max_row=1 + num_data_rows)
+            chart.add_data(data, titles_from_data=True)
+    _style_chart_series(chart)
+
+    chart_col = get_column_letter(len(display_cols) + 2)
+    ws.add_chart(chart, f"{chart_col}1")
+
+    ws.freeze_panes = "A2"
+
+
+def write_alerts_sheet(wb: Workbook, alerts: list[dict], fund_name: str):
+    """Create an alerts summary sheet."""
+    ws = wb.create_sheet(title="Alertas")
+
+    ws.merge_cells("A1:C1")
+    title_cell = ws["A1"]
+    title_cell.value = f"Alertas - {fund_name}"
+    title_cell.font = Font(name="Calibri", bold=True, size=14, color="2F5496")
+
+    if not alerts:
+        ws["A3"] = "Nenhum alerta identificado."
+        return
+
+    # Headers
+    ws.cell(row=3, column=1, value="Nivel")
+    ws.cell(row=3, column=2, value="Indicador")
+    ws.cell(row=3, column=3, value="Mensagem")
+    style_header_row(ws, 3, 3)
+
+    level_colors = {
+        "danger": "9C0006",
+        "warning": "9C6500",
+        "info": "006100",
+    }
+    level_fills = {
+        "danger": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+        "warning": PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+        "info": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+    }
+
+    for row_idx, alert in enumerate(alerts, 4):
+        level = alert.get("level", "info")
+        ws.cell(row=row_idx, column=1, value=level.upper())
+        ws.cell(row=row_idx, column=1).font = Font(bold=True, color=level_colors.get(level, "000000"))
+        ws.cell(row=row_idx, column=1).fill = level_fills.get(level, PatternFill())
+        ws.cell(row=row_idx, column=2, value=alert.get("metric", ""))
+        ws.cell(row=row_idx, column=3, value=alert.get("message", ""))
+        for col in range(1, 4):
+            ws.cell(row=row_idx, column=col).border = THIN_BORDER
+
+    auto_column_width(ws)
+
+
+def write_covenant_sheet(wb: Workbook, covenant_df: pd.DataFrame):
+    """Create a covenant compliance heatmap sheet."""
+    ws = wb.create_sheet(title="Covenants")
+
+    if covenant_df is None or covenant_df.empty:
+        ws["A1"] = "Sem dados de covenants disponiveis"
+        return
+
+    display_cols = list(covenant_df.columns)
+    subset = covenant_df.copy()
+    if "DT_COMPTC" in subset.columns:
+        subset["DT_COMPTC"] = pd.to_datetime(subset["DT_COMPTC"], errors="coerce").dt.strftime("%Y-%m")
+
+    # Headers
+    for col_idx, col_name in enumerate(display_cols, 1):
+        ws.cell(row=1, column=col_idx, value=col_name)
+    style_header_row(ws, 1, len(display_cols))
+
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+    for row_idx, (_, data_row) in enumerate(subset.iterrows(), 2):
+        for col_idx, col_name in enumerate(display_cols, 1):
+            val = data_row[col_name]
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = THIN_BORDER
+            # Color boolean covenant cells
+            if col_idx > 1 and isinstance(val, (bool,)):
+                cell.value = "OK" if val else "BREACH"
+                cell.fill = green_fill if val else red_fill
+                cell.font = Font(bold=True, color="006100" if val else "9C0006")
+                cell.alignment = Alignment(horizontal="center")
+
+    auto_column_width(ws)
+    ws.freeze_panes = "A2"
+
+
 def generate_report(
     kpi_df: pd.DataFrame,
     tables: dict[str, pd.DataFrame],
     output_path: Path,
     fund_name: str = "Facio FIDC Financeiros RL",
     per_class: dict[str, pd.DataFrame] | None = None,
+    analytics: dict | None = None,
 ):
-    """Generate the complete Excel report with dashboard and charts.
+    """Generate the complete Excel report with dashboard, analytics, and charts.
 
     Args:
         kpi_df: DataFrame with KPIs and MoM trends.
@@ -405,70 +578,128 @@ def generate_report(
         output_path: Where to save the .xlsx file.
         fund_name: Fund display name for the title.
         per_class: Optional dict with per-class DataFrames (pl_por_classe, cota_por_classe).
+        analytics: Optional dict with pre-computed analytics DataFrames:
+            - credit_quality: from compute_credit_quality_metrics
+            - credit_ratios_pl: from compute_credit_ratios_vs_pl
+            - sub_ratios: from compute_subordination_ratios
+            - perf_metrics: from compute_performance_metrics
+            - spread_metrics: from compute_cdi_spread
+            - flow_metrics: from compute_flow_metrics
+            - pl_waterfall: from compute_pl_waterfall
+            - covenant_timeline: from compute_covenant_timeline
+            - maturity_buckets: from compute_maturity_buckets
+            - alerts: from get_alert_flags (list of dicts)
     """
     per_class = per_class or {}
+    analytics = analytics or {}
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     wb = Workbook()
 
-    # Sheet 1: Dashboard
+    # ── Sheet 1: Dashboard ─────────────────────────────────────────────────
     write_dashboard(wb, kpi_df, fund_name)
 
-    # Sheet 2: PL Evolution
-    pl_cols = [c for c in kpi_df.columns if "PL" in c.upper() or "PATRIM" in c.upper()]
-    pl_cols = [c for c in pl_cols if not c.endswith("_MoM_%")]
+    # ── Sheet 2: Alerts ────────────────────────────────────────────────────
+    alerts = analytics.get("alerts")
+    if alerts:
+        write_alerts_sheet(wb, alerts, fund_name)
+
+    # ── Sheet 3: PL Evolution ──────────────────────────────────────────────
+    pl_cols = [c for c in kpi_df.columns if c == "PL"]
     if pl_cols:
         write_time_series_sheet(
-            wb, kpi_df, "PL Evolution", pl_cols, "Patrimonio Liquido - Evolucao", "area"
+            wb, kpi_df, "PL Evolucao", pl_cols, "Patrimonio Liquido - Evolucao", "area"
         )
 
-    # Sheet 3: Quota Values
-    cota_cols = [c for c in kpi_df.columns if "COTA" in c.upper() or "VALOR_COTA" in c.upper()]
-    cota_cols = [c for c in cota_cols if not c.endswith("_MoM_%")]
-    if cota_cols:
-        write_time_series_sheet(
-            wb, kpi_df, "Quota Values", cota_cols, "Valor da Cota por Classe", "line"
+    # ── Sheet 4: Credit Quality ────────────────────────────────────────────
+    credit_quality = analytics.get("credit_quality")
+    if credit_quality is not None and not credit_quality.empty:
+        cq_chart_cols = [c for c in ["Taxa_Inadimplencia_%", "Cobertura_Provisao_%"] if c in credit_quality.columns]
+        write_analytics_sheet(
+            wb, credit_quality, "Qualidade de Credito",
+            "Taxa de Inadimplencia e Cobertura (%)",
+            chart_cols=cq_chart_cols, chart_type="line",
         )
 
-    # Sheet 4: Monthly Returns
-    rentab_cols = [c for c in kpi_df.columns if "RENTAB" in c.upper()]
-    rentab_cols = [c for c in rentab_cols if not c.endswith("_MoM_%")]
-    if rentab_cols:
-        write_time_series_sheet(
-            wb, kpi_df, "Rentabilidade", rentab_cols, "Rentabilidade Mensal (%)", "line"
+    # ── Sheet 5: Credit Ratios vs PL ──────────────────────────────────────
+    credit_ratios_pl = analytics.get("credit_ratios_pl")
+    if credit_ratios_pl is not None and not credit_ratios_pl.empty:
+        ratio_cols = [c for c in ["Vencidos_x_PL_%", "Recompra_x_PL_%", "PDD_x_PL_%"]
+                      if c in credit_ratios_pl.columns]
+        write_analytics_sheet(
+            wb, credit_ratios_pl, "Indicadores vs PL",
+            "Vencidos, Recompra e PDD vs PL (%)",
+            chart_cols=ratio_cols, chart_type="line",
         )
 
-    # Sheet 5: Credit Rights
-    dc_cols = [c for c in kpi_df.columns if "DC_" in c.upper() or "PERFORM" in c.upper()]
-    dc_cols = [c for c in dc_cols if not c.endswith("_MoM_%")]
-    if dc_cols:
-        write_time_series_sheet(
-            wb, kpi_df, "Credit Rights", dc_cols, "Direitos Creditorios", "bar"
+    # ── Sheet 6: Subordination ─────────────────────────────────────────────
+    sub_ratios = analytics.get("sub_ratios")
+    if sub_ratios is not None and not sub_ratios.empty:
+        sub_chart_cols = [c for c in sub_ratios.columns if c.endswith("_%") and "Subordinacao" in c]
+        write_analytics_sheet(
+            wb, sub_ratios, "Subordinacao",
+            "Razao de Subordinacao (%)",
+            chart_cols=sub_chart_cols, chart_type="line",
         )
 
-    # Sheet 6: Resgates e Aquisicoes
-    flow_cols = [c for c in kpi_df.columns if c in ("AQUISICOES", "RESGATES")]
-    if flow_cols:
-        write_time_series_sheet(
-            wb, kpi_df, "Resgates e Aquisicoes", flow_cols, "Resgates e Aquisicoes", "bar"
+    # ── Sheet 7: Performance & CDI Spread ──────────────────────────────────
+    spread_metrics = analytics.get("spread_metrics")
+    if spread_metrics is not None and not spread_metrics.empty:
+        spread_chart = [c for c in ["Acumulado_Fundo_%", "Acumulado_CDI_%"]
+                        if c in spread_metrics.columns]
+        write_analytics_sheet(
+            wb, spread_metrics, "Performance vs CDI",
+            "Retorno Acumulado: Fundo vs CDI (%)",
+            chart_cols=spread_chart, chart_type="line",
         )
 
-    # Sheet 7: Inadimplência (valores absolutos)
-    inad_val_cols = [c for c in kpi_df.columns
-                     if c in ("INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO", "DC_NAO_PERFORMAR", "SUBSTITUICAO")]
-    if inad_val_cols:
-        write_time_series_sheet(
-            wb, kpi_df, "Inadimplencia", inad_val_cols, "Inadimplencia - Valores Absolutos", "bar"
+    perf_metrics = analytics.get("perf_metrics")
+    if perf_metrics is not None and not perf_metrics.empty:
+        perf_chart = [c for c in ["Rentabilidade_%"] if c in perf_metrics.columns]
+        write_analytics_sheet(
+            wb, perf_metrics, "Performance",
+            "Rentabilidade Mensal (%)",
+            chart_cols=perf_chart, chart_type="line",
         )
 
-    # Sheet 8: Taxa de Inadimplência (%)
-    if "TAXA_INADIMPLENCIA" in kpi_df.columns:
-        write_time_series_sheet(
-            wb, kpi_df, "Taxa Inadimplencia", ["TAXA_INADIMPLENCIA"],
-            "Taxa de Inadimplencia (%)", "line"
+    # ── Sheet 8: Flow ──────────────────────────────────────────────────────
+    flow_metrics = analytics.get("flow_metrics")
+    if flow_metrics is not None and not flow_metrics.empty:
+        flow_chart = [c for c in ["Aquisicoes", "Resgates", "Fluxo_Liquido"]
+                      if c in flow_metrics.columns]
+        write_analytics_sheet(
+            wb, flow_metrics, "Fluxo",
+            "Aquisicoes, Resgates e Fluxo Liquido",
+            chart_cols=flow_chart, chart_type="bar",
         )
 
-    # Per-class sheets
+    # ── Sheet 9: PL Waterfall ──────────────────────────────────────────────
+    pl_waterfall = analytics.get("pl_waterfall")
+    if pl_waterfall is not None and not pl_waterfall.empty:
+        wf_chart = [c for c in ["Rendimentos", "Aquisicoes", "Resgates", "Inadimplencia", "Outros"]
+                     if c in pl_waterfall.columns]
+        write_analytics_sheet(
+            wb, pl_waterfall, "PL Waterfall",
+            "Decomposicao da Variacao do PL",
+            chart_cols=wf_chart, chart_type="bar",
+        )
+
+    # ── Sheet 10: Covenants ────────────────────────────────────────────────
+    covenant_timeline = analytics.get("covenant_timeline")
+    if covenant_timeline is not None:
+        write_covenant_sheet(wb, covenant_timeline)
+
+    # ── Sheet 11: Maturity ─────────────────────────────────────────────────
+    maturity = analytics.get("maturity_buckets")
+    if maturity is not None and not maturity.empty:
+        mat_cols = [c for c in maturity.columns if c != "DT_COMPTC"]
+        write_analytics_sheet(
+            wb, maturity, "Vencimento",
+            "Direitos Creditorios por Faixa de Vencimento",
+            chart_cols=mat_cols, chart_type="bar",
+        )
+
+    # ── Per-class sheets ───────────────────────────────────────────────────
     if "pl_por_classe" in per_class:
         write_per_class_sheet(
             wb, per_class["pl_por_classe"],
@@ -481,8 +712,57 @@ def generate_report(
             "Cota por Classe", "Valor da Cota por Classe", "line"
         )
 
-    # Raw Data sheets
+    if "cotistas_por_classe" in per_class:
+        write_per_class_sheet(
+            wb, per_class["cotistas_por_classe"],
+            "Cotistas por Classe", "Numero de Cotistas por Classe", "line"
+        )
+
+    # ── Raw KPI data ───────────────────────────────────────────────────────
+    _write_kpi_data_sheet(wb, kpi_df)
+
+    # ── Raw Data sheets ────────────────────────────────────────────────────
     write_raw_data_sheet(wb, tables)
 
     wb.save(output_path)
     print(f"\n  Report saved to: {output_path}")
+
+
+def _write_kpi_data_sheet(wb: Workbook, kpi_df: pd.DataFrame):
+    """Write a complete KPI data sheet with all time series."""
+    ws = wb.create_sheet(title="KPIs Completo")
+    if kpi_df.empty:
+        ws["A1"] = "Sem dados"
+        return
+
+    # Filter out MoM columns for cleaner output
+    cols = [c for c in kpi_df.columns if not c.endswith("_MoM_%") and c not in (
+        "CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "DENOM_SOCIAL", "CLASSE", "CNPJ_CLASSE",
+    )]
+
+    subset = kpi_df[cols].copy()
+    if "DT_COMPTC" in subset.columns:
+        subset["DT_COMPTC"] = pd.to_datetime(subset["DT_COMPTC"], errors="coerce").dt.strftime("%Y-%m")
+
+    # Headers
+    for col_idx, col_name in enumerate(cols, 1):
+        display_name = KPI_DISPLAY_NAMES.get(col_name, col_name)
+        ws.cell(row=1, column=col_idx, value=display_name)
+    style_header_row(ws, 1, len(cols))
+
+    # Data
+    for row_idx, (_, data_row) in enumerate(subset.iterrows(), 2):
+        for col_idx, col_name in enumerate(cols, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=data_row[col_name])
+            cell.border = THIN_BORDER
+            if col_idx > 1 and isinstance(cell.value, (int, float)):
+                header_upper = col_name.upper()
+                if "MOM" in header_upper or "%" in header_upper or "TAXA" in header_upper or "RENTAB" in header_upper:
+                    cell.number_format = PCT_FORMAT
+                elif "NR_" in header_upper or "COTIST" in header_upper:
+                    cell.number_format = INTEGER_FORMAT
+                else:
+                    cell.number_format = BRL_FORMAT
+
+    auto_column_width(ws)
+    ws.freeze_panes = "A2"

@@ -20,6 +20,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import DATA_DIR, DEFAULT_MONTHS_BACK, FUNDS, OUTPUT_DIR
+from src.analytics import (
+    compute_cdi_spread,
+    compute_covenant_timeline,
+    compute_credit_quality_metrics,
+    compute_credit_ratios_vs_pl,
+    compute_flow_metrics,
+    compute_maturity_buckets,
+    compute_performance_metrics,
+    compute_pl_waterfall,
+    compute_subordination_ratios,
+    fetch_cdi_monthly,
+    get_alert_flags,
+)
 from src.downloader import download_monthly_zips
 from src.excel_report import generate_report
 from src.kpi_extractor import compute_trends, extract_kpis, extract_per_class_data
@@ -160,9 +173,48 @@ def main():
     # Extract per-class breakdowns
     per_class = extract_per_class_data(tables)
 
-    # Step 4: Generate report
-    print(f"\n[4/4] Generating Excel report...")
-    generate_report(kpi_df, tables, output_path, fund_name, per_class)
+    # Step 4: Compute analytics
+    print(f"\n[4/5] Computing analytics...")
+    credit_quality = compute_credit_quality_metrics(kpi_df)
+    credit_ratios_pl = compute_credit_ratios_vs_pl(kpi_df)
+    flow_metrics = compute_flow_metrics(kpi_df)
+    perf_metrics = compute_performance_metrics(kpi_df, per_class or {})
+    sub_ratios = compute_subordination_ratios(per_class or {})
+    pl_waterfall = compute_pl_waterfall(kpi_df)
+    maturity_buckets = compute_maturity_buckets(tables)
+
+    # Fetch CDI and compute spread
+    cdi_df = None
+    spread_metrics = pd.DataFrame()
+    if not kpi_df.empty and "DT_COMPTC" in kpi_df.columns:
+        min_date = pd.to_datetime(kpi_df["DT_COMPTC"]).min()
+        max_date = pd.to_datetime(kpi_df["DT_COMPTC"]).max()
+        if pd.notna(min_date) and pd.notna(max_date):
+            cdi_start = min_date.strftime("%d/%m/%Y")
+            cdi_end = max_date.strftime("%d/%m/%Y")
+            print(f"  Fetching CDI data ({cdi_start} to {cdi_end})...")
+            cdi_df = fetch_cdi_monthly(cdi_start, cdi_end)
+            spread_metrics = compute_cdi_spread(perf_metrics, cdi_df)
+
+    covenant_timeline = compute_covenant_timeline(kpi_df, per_class or {})
+    alerts = get_alert_flags(kpi_df, per_class or {})
+
+    analytics = {
+        "credit_quality": credit_quality,
+        "credit_ratios_pl": credit_ratios_pl,
+        "sub_ratios": sub_ratios,
+        "perf_metrics": perf_metrics,
+        "spread_metrics": spread_metrics,
+        "flow_metrics": flow_metrics,
+        "pl_waterfall": pl_waterfall,
+        "covenant_timeline": covenant_timeline,
+        "maturity_buckets": maturity_buckets,
+        "alerts": alerts,
+    }
+
+    # Step 5: Generate report
+    print(f"\n[5/5] Generating Excel report...")
+    generate_report(kpi_df, tables, output_path, fund_name, per_class, analytics)
 
     print(f"\n{'='*60}")
     print(f"  Done! Report saved to: {output_path}")

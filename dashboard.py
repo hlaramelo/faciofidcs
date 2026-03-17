@@ -1769,37 +1769,34 @@ with st.sidebar:
             width="stretch",
         )
 
-        # Bulk export: all analytics in one file
+        # Bulk export: full formatted Excel report with charts
         import io
-        buf = io.BytesIO()
+        from src.excel_report import generate_report as _gen_report
+
         fn_safe = fund_name.lower().replace(" ", "_")
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            export_df.to_excel(writer, sheet_name="KPIs", index=False)
-            if not credit_quality.empty:
-                cq_exp = credit_quality.copy()
-                cq_exp["DT_COMPTC"] = cq_exp["DT_COMPTC"].dt.strftime("%Y-%m")
-                cq_exp.to_excel(writer, sheet_name="Qualidade Credito", index=False)
-            if sub_ratios is not None and not sub_ratios.empty:
-                sr_exp = sub_ratios.copy()
-                sr_exp["DT_COMPTC"] = sr_exp["DT_COMPTC"].dt.strftime("%Y-%m")
-                sr_exp.to_excel(writer, sheet_name="Subordinacao", index=False)
-            if not spread_metrics.empty:
-                sp_exp = spread_metrics.copy()
-                sp_exp["DT_COMPTC"] = sp_exp["DT_COMPTC"].dt.strftime("%Y-%m")
-                sp_exp.to_excel(writer, sheet_name="Performance", index=False)
-            if not flow_metrics.empty:
-                fl_exp = flow_metrics.copy()
-                fl_exp["DT_COMPTC"] = fl_exp["DT_COMPTC"].dt.strftime("%Y-%m")
-                fl_exp.to_excel(writer, sheet_name="Fluxo", index=False)
-            if not credit_ratios_pl.empty:
-                crpl_exp = credit_ratios_pl.copy()
-                crpl_exp["DT_COMPTC"] = crpl_exp["DT_COMPTC"].dt.strftime("%Y-%m")
-                crpl_exp.to_excel(writer, sheet_name="Indicadores vs PL", index=False)
-            if covenant_timeline is not None and not covenant_timeline.empty:
-                ct_exp = covenant_timeline.copy()
-                ct_exp["DT_COMPTC"] = ct_exp["DT_COMPTC"].dt.strftime("%Y-%m")
-                ct_exp.to_excel(writer, sheet_name="Covenants", index=False)
-        buf.seek(0)
+        buf = io.BytesIO()
+
+        _analytics = {
+            "credit_quality": credit_quality,
+            "credit_ratios_pl": credit_ratios_pl,
+            "sub_ratios": sub_ratios,
+            "perf_metrics": perf_metrics,
+            "spread_metrics": spread_metrics,
+            "flow_metrics": flow_metrics,
+            "pl_waterfall": pl_waterfall,
+            "covenant_timeline": covenant_timeline,
+            "maturity_buckets": maturity_buckets,
+            "alerts": alerts,
+        }
+
+        # Generate into BytesIO via temp path
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        _gen_report(kpi_df, tables or {}, tmp_path, fund_name, per_class, _analytics)
+        buf.write(tmp_path.read_bytes())
+        tmp_path.unlink(missing_ok=True)
+
         st.download_button(
             "Download Completo (Excel)",
             buf.getvalue(),
