@@ -120,6 +120,22 @@ COLUMN_PATTERNS = {
         r"TAB_VII.*VL.*SUBSTIT",
         r"VL_SUBSTIT",
     ],
+    # Overdue (vencidos) credit rights — past-due receivables (from tab_VI)
+    "VENCIDOS_VL": [
+        r"TAB_VI.*VL.*VENC",
+        r"TAB_VI.*VENCID",
+        r"TAB_VI.*CR[EÉ]D.*VENC",
+        r"VL_CRED.*VENC",
+        r"VL_VENCID",
+        r"TAB_V.*VL.*VENC",
+    ],
+    # Buyback / repurchase of credit rights (from tab_VII)
+    "RECOMPRA_VL": [
+        r"TAB_VII.*RECOMPRA",
+        r"TAB_VII.*VL.*RECOMPRA",
+        r"VL_RECOMPRA",
+        r"RECOMPRA",
+    ],
 }
 
 
@@ -224,7 +240,7 @@ def extract_kpis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         sum_cols = [c for c in numeric_cols if c in (
             "PL", "ATIVO_TOTAL", "DC_PERFORMAR", "DC_NAO_PERFORMAR",
             "AQUISICOES", "RESGATES", "INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO",
-            "SUBSTITUICAO",
+            "SUBSTITUICAO", "VENCIDOS_VL", "RECOMPRA_VL",
         )]
         # NR_COTISTAS: use max, not sum — each class row reports the same
         # fund-level total or a class-level count that shouldn't be summed

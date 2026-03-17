@@ -19,6 +19,7 @@ from src.analytics import (
     compute_cdi_spread,
     compute_covenant_timeline,
     compute_credit_quality_metrics,
+    compute_credit_ratios_vs_pl,
     compute_data_quality,
     compute_flow_metrics,
     compute_maturity_buckets,
@@ -551,6 +552,7 @@ if kpi_df is None or kpi_df.empty:
 
 per_class = per_class or {}
 credit_quality = compute_credit_quality_metrics(kpi_df)
+credit_ratios_pl = compute_credit_ratios_vs_pl(kpi_df)
 flow_metrics = compute_flow_metrics(kpi_df)
 perf_metrics = compute_performance_metrics(kpi_df, per_class)
 sub_ratios = compute_subordination_ratios(per_class)
@@ -853,11 +855,85 @@ with tab_credit:
             )
             st.plotly_chart(fig, width="stretch", key="credit_mom")
 
+    # ── Ratios vs PL (Vencidos x PL, Recompra x PL, PDD x PL) ──────────────
+    st.markdown("---")
+    st.markdown('<div class="section-header">Indicadores vs PL</div>', unsafe_allow_html=True)
+
+    if not credit_ratios_pl.empty:
+        cr_latest = credit_ratios_pl.iloc[-1]
+        cr_prev = credit_ratios_pl.iloc[-2] if len(credit_ratios_pl) > 1 else None
+
+        def _cr_delta(col):
+            if cr_prev is None:
+                return None
+            v, p = cr_latest.get(col), cr_prev.get(col) if cr_prev is not None else None
+            if pd.notna(v) and pd.notna(p):
+                diff = v - p
+                return f"{diff:+.2f} pp"
+            return None
+
+        cr1, cr2, cr3 = st.columns(3)
+        with cr1:
+            st.metric(
+                "Vencidos x PL",
+                format_pct(cr_latest.get("Vencidos_x_PL_%")),
+                delta=_cr_delta("Vencidos_x_PL_%"),
+                delta_color="inverse",
+            )
+        with cr2:
+            st.metric(
+                "Recompra x PL",
+                format_pct(cr_latest.get("Recompra_x_PL_%")),
+                delta=_cr_delta("Recompra_x_PL_%"),
+                delta_color="inverse",
+            )
+        with cr3:
+            st.metric(
+                "PDD x PL",
+                format_pct(cr_latest.get("PDD_x_PL_%")),
+                delta=_cr_delta("PDD_x_PL_%"),
+                delta_color="inverse",
+            )
+
+        st.markdown("")
+
+        # Charts for the ratios
+        ratio_cols = [c for c in ["Vencidos_x_PL_%", "Recompra_x_PL_%", "PDD_x_PL_%"]
+                      if c in credit_ratios_pl.columns and credit_ratios_pl[c].notna().any()]
+
+        if ratio_cols:
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                fig = styled_line_chart(
+                    credit_ratios_pl, "DT_COMPTC", ratio_cols,
+                    "Evolucao: Vencidos, Recompra e PDD vs PL", y_format="pct",
+                    colors=[COLORS["danger"], COLORS["warning"], COLORS["info"]],
+                )
+                st.plotly_chart(fig, width="stretch", key="credit_ratios_pl")
+
+            with col_r2:
+                # Individual bar chart for each ratio over time
+                if "Vencidos_x_PL_%" in credit_ratios_pl.columns:
+                    fig = styled_bar_chart(
+                        credit_ratios_pl, "DT_COMPTC", ["Vencidos_x_PL_%"],
+                        "Vencidos x PL (%)", y_format="pct",
+                        colors=[COLORS["danger"]],
+                    )
+                    st.plotly_chart(fig, width="stretch", key="credit_vencidos_pl")
+    else:
+        st.info("Dados de Vencidos/Recompra/PDD nao disponiveis para este periodo.")
+
     # Data table
     with st.expander("Dados detalhados - Qualidade de Credito"):
         display_cq = credit_quality.copy()
         display_cq["DT_COMPTC"] = display_cq["DT_COMPTC"].dt.strftime("%Y-%m")
         st.dataframe(display_cq, width="stretch", hide_index=True)
+
+    with st.expander("Dados detalhados - Indicadores vs PL"):
+        if not credit_ratios_pl.empty:
+            display_cr = credit_ratios_pl.copy()
+            display_cr["DT_COMPTC"] = display_cr["DT_COMPTC"].dt.strftime("%Y-%m")
+            st.dataframe(display_cr, width="stretch", hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1682,6 +1758,10 @@ with st.sidebar:
                 fl_exp = flow_metrics.copy()
                 fl_exp["DT_COMPTC"] = fl_exp["DT_COMPTC"].dt.strftime("%Y-%m")
                 fl_exp.to_excel(writer, sheet_name="Fluxo", index=False)
+            if not credit_ratios_pl.empty:
+                crpl_exp = credit_ratios_pl.copy()
+                crpl_exp["DT_COMPTC"] = crpl_exp["DT_COMPTC"].dt.strftime("%Y-%m")
+                crpl_exp.to_excel(writer, sheet_name="Indicadores vs PL", index=False)
             if covenant_timeline is not None and not covenant_timeline.empty:
                 ct_exp = covenant_timeline.copy()
                 ct_exp["DT_COMPTC"] = ct_exp["DT_COMPTC"].dt.strftime("%Y-%m")

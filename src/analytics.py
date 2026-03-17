@@ -109,6 +109,44 @@ def compute_credit_quality_metrics(kpi_df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def compute_credit_ratios_vs_pl(kpi_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute credit risk ratios relative to PL (Net Equity).
+
+    Returns DataFrame with:
+    - Vencidos_x_PL_%: overdue receivables as % of PL
+    - Recompra_x_PL_%: buyback activity as % of PL
+    - PDD_x_PL_%: provisions for doubtful debts as % of PL
+    """
+    result = kpi_df[["DT_COMPTC"]].copy()
+    result["DT_COMPTC"] = pd.to_datetime(result["DT_COMPTC"], errors="coerce")
+
+    pl = kpi_df.get("PL")
+    if pl is None:
+        return result
+
+    pl_safe = pl.replace(0, np.nan)
+
+    # Vencidos x PL: overdue receivables / PL
+    # Try VENCIDOS_VL first, fall back to INADIMPLENCIA_VL
+    vencidos = kpi_df.get("VENCIDOS_VL")
+    if vencidos is None:
+        vencidos = kpi_df.get("INADIMPLENCIA_VL")
+    if vencidos is not None:
+        result["Vencidos_x_PL_%"] = (vencidos.abs() / pl_safe) * 100
+
+    # Recompra x PL: buyback / PL
+    recompra = kpi_df.get("RECOMPRA_VL")
+    if recompra is not None:
+        result["Recompra_x_PL_%"] = (recompra.abs() / pl_safe) * 100
+
+    # PDD x PL: provisions / PL
+    pdd = kpi_df.get("INADIMPLENCIA_PROVISAO")
+    if pdd is not None:
+        result["PDD_x_PL_%"] = (pdd.abs() / pl_safe) * 100
+
+    return result
+
+
 def compute_flow_metrics(kpi_df: pd.DataFrame) -> pd.DataFrame:
     """Compute portfolio flow metrics (acquisitions, redemptions, net flow)."""
     result = kpi_df[["DT_COMPTC"]].copy()
