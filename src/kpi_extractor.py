@@ -325,8 +325,9 @@ def compute_trends(kpi_df: pd.DataFrame) -> pd.DataFrame:
 
     # MoM percentage changes — only between truly consecutive months
     if "DT_COMPTC" in result.columns:
+        result["DT_COMPTC"] = pd.to_datetime(result["DT_COMPTC"], errors="coerce")
         result = result.sort_values("DT_COMPTC").reset_index(drop=True)
-        dates = pd.to_datetime(result["DT_COMPTC"])
+        dates = result["DT_COMPTC"]
         # Check if each row is exactly 1 month after the previous
         month_diff = dates.dt.to_period("M").astype(int).diff()
         is_consecutive = month_diff == 1
