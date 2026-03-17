@@ -352,6 +352,8 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
     """
     result = {}
 
+    print("\n  Extracting per-class data...")
+
     # --- PL por Classe ---
     # Try tab_IV first (PL by class), then tab_I with CLASSE column
     pl_class_df = _pivot_by_class(
@@ -390,6 +392,11 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
     if nr_class_df is not None:
         result["cotistas_por_classe"] = nr_class_df
 
+    if not result:
+        print("  WARNING: No per-class data extracted from any table!")
+    else:
+        print(f"  Per-class extraction complete: {list(result.keys())}")
+
     return result
 
 
@@ -403,7 +410,6 @@ def _normalize_class_name(raw_name) -> str:
         'Classe Subordinada' -> 'Subordinada'
         'Facio 3 FIDC RL - Subclasse Senior Serie 1' -> 'Senior'
     """
-    import pandas as pd
     if raw_name is None or (isinstance(raw_name, float) and pd.isna(raw_name)):
         return "Desconhecida"
     name = str(raw_name).strip().upper()
@@ -414,7 +420,7 @@ def _normalize_class_name(raw_name) -> str:
     if "SENIOR" in name or "SÊNIOR" in name or "SENIO" in name or "SÊNIO" in name:
         return "Senior"
     if "SUBORDINAD" in name or "JUNIOR" in name or "JÚNIOR" in name or "SUB " in name:
-        return "Junior"
+        return "Subordinada"
     # Fallback: return cleaned original
     return raw_name.strip().title()
 
@@ -461,16 +467,24 @@ def _pivot_by_class(
     for table_name in table_priority:
         df = tables.get(table_name)
         if df is None or df.empty or "DT_COMPTC" not in df.columns:
+            print(f"    [{label}] {table_name}: not found or empty, skipping")
             continue
 
-        # Find class column
+        print(f"    [{label}] trying {table_name} ({len(df)} rows, {len(df.columns)} cols)")
+
+        # Find class column — must have >1 unique value (otherwise no class breakdown)
         class_col = None
         for cc in class_col_candidates:
             if cc in df.columns:
                 unique_vals = df[cc].dropna().unique()
                 if len(unique_vals) > 1:
                     class_col = cc
+                    sample = [str(v)[:60] for v in unique_vals[:6]]
+                    print(f"      class_col = '{cc}' ({len(unique_vals)} unique): {sample}")
                     break
+                else:
+                    val_str = str(unique_vals[0])[:60] if len(unique_vals) == 1 else "empty"
+                    print(f"      {cc}: only {len(unique_vals)} unique ({val_str}), skipping")
 
         if class_col is None:
             # For tab_X_2/3/4, use the table name itself as class identifier
@@ -478,15 +492,17 @@ def _pivot_by_class(
                 class_map = {
                     "tab_X_2": "Senior",
                     "tab_X_3": "Mezanino",
-                    "tab_X_4": "Junior",
+                    "tab_X_4": "Subordinada",
                 }
                 if table_name in class_map:
+                    print(f"      Falling back to separate tab_X tables")
                     return _build_from_separate_tables(
                         tables, class_map, value_patterns, label
                     )
+            print(f"      No class column found in {table_name}")
             continue
 
-        # Find value column
+        # Find value column — try each pattern against all columns
         value_col = None
         for col in df.columns:
             for pattern in value_patterns:
@@ -494,11 +510,21 @@ def _pivot_by_class(
                     values = pd.to_numeric(df[col], errors="coerce")
                     if not values.isna().all():
                         value_col = col
+                        median_val = values.dropna().median()
+                        print(f"      value_col = '{col}' (pattern '{pattern}', median={median_val:.2f})")
                         break
             if value_col:
                 break
 
         if value_col is None:
+            # Show what columns ARE available for debugging
+            all_cols = [c for c in df.columns if c not in (
+                "DT_COMPTC", "CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE", "CNPJ_CLASSE",
+                "DENOM_SOCIAL", "CLASSE", "TP_CLASSE", "DS_CLASSE", "NM_CLASSE",
+                "CLASSE_SERIE", "TAB_X_CLASSE_SERIE", "CLASSE_UNICA",
+            )]
+            print(f"      NO value column matched! Patterns: {value_patterns}")
+            print(f"      Available columns ({len(all_cols)}): {all_cols[:20]}")
             continue
 
         # Pivot: rows=date, columns=class, values=numeric value
@@ -511,16 +537,20 @@ def _pivot_by_class(
         pivot_df = pivot_df.dropna(subset=[value_col, class_col])
 
         if pivot_df.empty:
+            print(f"      Pivot data empty after dropna")
             continue
 
         # Normalize class names to top-level groups (Senior, Mezanino, Subordinada)
         pivot_df["_classe_grupo"] = pivot_df[class_col].apply(_normalize_class_name)
+        unique_classes = pivot_df["_classe_grupo"].unique()
+        print(f"      Normalized classes: {list(unique_classes)}")
 
         # Detect if multiple funds are present (via DENOM_SOCIAL)
         multi_fund = False
         if "DENOM_SOCIAL" in pivot_df.columns:
             fund_names_in_data = pivot_df["DENOM_SOCIAL"].dropna().apply(_extract_fund_short_name).unique()
             multi_fund = len(fund_names_in_data) > 1
+            print(f"      multi_fund={multi_fund}, funds={list(fund_names_in_data)}")
 
         if multi_fund:
             # Create combined fund+class label: "Facio 3 - Senior"
@@ -542,6 +572,7 @@ def _pivot_by_class(
             )
 
         if pivoted.empty or pivoted.columns.empty:
+            print(f"      Pivoted result is empty")
             continue
 
         # Clean column names
@@ -551,9 +582,10 @@ def _pivot_by_class(
         pivoted = pivoted[sorted_cols]
         pivoted = pivoted.reset_index().sort_values("DT_COMPTC")
 
-        print(f"  Per-class {label}: {len(pivoted)} months, classes: {list(pivoted.columns[1:])}")
+        print(f"  OK Per-class {label}: {len(pivoted)} months, classes: {list(pivoted.columns[1:])}")
         return pivoted
 
+    print(f"  FAILED Per-class {label}: no data found in any table")
     return None
 
 
