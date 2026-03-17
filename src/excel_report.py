@@ -738,6 +738,12 @@ def generate_report(
             "Cotistas por Classe", "Numero de Cotistas por Classe", "line"
         )
 
+    if "rentab_por_classe" in per_class:
+        write_per_class_sheet(
+            wb, per_class["rentab_por_classe"],
+            "Rentab por Classe", "Rentabilidade Mensal por Classe (%)", "line"
+        )
+
     # ── Raw KPI data ───────────────────────────────────────────────────────
     _write_kpi_data_sheet(wb, kpi_df)
 

@@ -26,11 +26,11 @@ COLUMN_PATTERNS = {
         r"TAB_I1.*VL_ATIVO",
     ],
     "VALOR_COTA": [
-        r"TAB_I2C5_VL_COTA",       # New column added Nov 2023
-        r"VL_COTA",
-        r"TAB_I2.*VL_COTA",
-        r"TAB_X_VL_COTA",
-        r"TAB_X.*VL_COTA\b",
+        r"TAB_X_VL_COTA\b",         # tab_X_2 cota value (most reliable)
+        r"TAB_I2C5_VL_COTA\b",      # New column added Nov 2023 (exact match)
+        # Note: do NOT match TAB_I2C5_VL_COTA_FUNDO_ICVM555 or TAB_I2C5_VL_COTA_FIF
+        # — those are the value of fund shares held as assets, not the fund's own cota
+        r"VL_COTA\b",
     ],
     "NR_COTISTAS": [
         # Handled specially in extract_kpis — sum all NR_COTST breakdown columns
@@ -344,6 +344,62 @@ def compute_trends(kpi_df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _enrich_tables_with_classe(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """Enrich tables that lack a CLASSE column by joining with tab_I.
+
+    Many CVM tables (tab_IV, tab_X_2, etc.) have per-class rows identified
+    by CNPJ_FUNDO_CLASSE but no CLASSE column. tab_I has both CNPJ_FUNDO_CLASSE
+    and CLASSE, so we can join to get class names for pivoting.
+    """
+    tab_i = tables.get("tab_I")
+    if tab_i is None or tab_i.empty:
+        return tables
+
+    # Build a CNPJ -> CLASSE mapping from tab_I
+    cnpj_col = None
+    for c in ["CNPJ_FUNDO_CLASSE", "CNPJ_CLASSE"]:
+        if c in tab_i.columns and "CLASSE" in tab_i.columns:
+            cnpj_col = c
+            break
+
+    if cnpj_col is None or "CLASSE" not in tab_i.columns:
+        return tables
+
+    # Create unique CNPJ -> CLASSE + DENOM_SOCIAL mapping
+    mapping_cols = [cnpj_col, "CLASSE"]
+    if "DENOM_SOCIAL" in tab_i.columns:
+        mapping_cols.append("DENOM_SOCIAL")
+    classe_map = tab_i[mapping_cols].drop_duplicates(subset=[cnpj_col]).copy()
+
+    enriched = {}
+    for tname, tdf in tables.items():
+        if tname == "tab_I":
+            enriched[tname] = tdf
+            continue
+
+        # Only enrich if table has CNPJ col but no CLASSE
+        if cnpj_col in tdf.columns and "CLASSE" not in tdf.columns:
+            merged = tdf.merge(
+                classe_map, on=cnpj_col, how="left", suffixes=("", "_from_tab_I"),
+            )
+            # If DENOM_SOCIAL already existed, prefer the enriched one (with class suffix)
+            if "DENOM_SOCIAL_from_tab_I" in merged.columns:
+                # Keep original DENOM_SOCIAL but add the tab_I one as DENOM_SOCIAL
+                # only if the original doesn't have class info
+                merged["DENOM_SOCIAL"] = merged["DENOM_SOCIAL_from_tab_I"].fillna(
+                    merged.get("DENOM_SOCIAL", "")
+                )
+                merged = merged.drop(columns=["DENOM_SOCIAL_from_tab_I"], errors="ignore")
+            enriched[tname] = merged
+            added_cols = [c for c in ["CLASSE", "DENOM_SOCIAL"] if c in merged.columns and c not in tdf.columns]
+            if added_cols:
+                print(f"    Enriched {tname} with {added_cols} from tab_I ({len(merged)} rows)")
+        else:
+            enriched[tname] = tdf
+
+    return enriched
+
+
 def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     """Extract per-class time series for PL and Valor da Cota.
 
@@ -354,12 +410,17 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
 
     print("\n  Extracting per-class data...")
 
+    # Enrich tables that lack CLASSE with data from tab_I
+    # tab_IV, tab_X_2, etc. often have per-class rows (one per CNPJ_FUNDO_CLASSE)
+    # but no CLASSE column — only DENOM_SOCIAL with just the fund name.
+    # We join with tab_I to get the actual class name.
+    enriched_tables = _enrich_tables_with_classe(tables)
+
     # --- PL por Classe ---
-    # Try tab_IV first (PL by class), then tab_I with CLASSE column
     pl_class_df = _pivot_by_class(
-        tables,
+        enriched_tables,
         table_priority=["tab_IV", "tab_I"],
-        value_patterns=[r"VL_PATRIM_LIQ", r"TAB_IV.*PATRIM", r"TAB_IV.*VL_PL",
+        value_patterns=[r"TAB_IV.*VL_PL", r"VL_PATRIM_LIQ",
                         r"TAB_I2.*PATRIM", r"VL_PL"],
         label="PL",
         agg_func="sum",
@@ -368,24 +429,36 @@ def extract_per_class_data(tables: dict[str, pd.DataFrame]) -> dict[str, pd.Data
         result["pl_por_classe"] = pl_class_df
 
     # --- Valor da Cota por Classe ---
-    # Try tab_I first (has all classes with CLASSE column), then tab_X_2/3/4
+    # tab_X_2 has TAB_X_VL_COTA (correct cota values) and TAB_X_CLASSE_SERIE
+    # Do NOT search tab_I: TAB_I2C5_VL_COTA_FUNDO_ICVM555 is fund shares held
+    # as assets, not the fund's own cota value.
     cota_class_df = _pivot_by_class(
-        tables,
-        table_priority=["tab_I", "tab_X_2", "tab_X_3", "tab_X_4"],
-        value_patterns=[r"TAB_I2C5_VL_COTA", r"VL_COTA",
-                        r"TAB_X_VL_COTA", r"TAB_X.*VL_COTA\b"],
+        enriched_tables,
+        table_priority=["tab_X_2", "tab_X_3", "tab_X_4"],
+        value_patterns=[r"TAB_X_VL_COTA\b", r"TAB_X_VL_COTA$"],
         label="Cota",
         agg_func="mean",
     )
     if cota_class_df is not None:
         result["cota_por_classe"] = cota_class_df
 
+    # --- Rentabilidade por Classe ---
+    rentab_class_df = _pivot_by_class(
+        enriched_tables,
+        table_priority=["tab_X_3", "tab_X_2"],
+        value_patterns=[r"TAB_X_VL_RENTAB_MES", r"VL_RENTAB"],
+        label="Rentab",
+        agg_func="mean",
+    )
+    if rentab_class_df is not None:
+        result["rentab_por_classe"] = rentab_class_df
+
     # --- NR_COTISTAS por Classe ---
     nr_class_df = _pivot_by_class(
-        tables,
-        table_priority=["tab_I", "tab_X_1"],
-        value_patterns=[r"NR_COTST", r"NR_COTISTAS", r"QT_COTST",
-                        r"QT_COTISTAS", r"TAB_X.*NR_COTST"],
+        enriched_tables,
+        table_priority=["tab_X_1", "tab_I"],
+        value_patterns=[r"TAB_X_NR_COTST\b", r"NR_COTST_TOTAL",
+                        r"NR_COTISTAS", r"QT_COTST"],
         label="Cotistas",
         agg_func="max",
     )
