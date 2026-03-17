@@ -167,9 +167,13 @@ def styled_line_chart(df, x, y_cols, title, y_format=None, colors=None):
     valid_cols = [c for c in y_cols if c in df.columns]
     # Filter to rows where at least one y column has data
     if valid_cols:
-        plot_df = df.dropna(subset=valid_cols, how="all")
+        plot_df = df.dropna(subset=valid_cols, how="all").copy()
     else:
-        plot_df = df
+        plot_df = df.copy()
+    # Ensure x-axis is datetime for proper date formatting
+    if x in plot_df.columns:
+        plot_df[x] = pd.to_datetime(plot_df[x], errors="coerce")
+        plot_df = plot_df.dropna(subset=[x])
     for i, col in enumerate(valid_cols):
         fig.add_trace(go.Scatter(
             x=plot_df[x], y=plot_df[col], name=col, mode="lines+markers",
@@ -190,7 +194,11 @@ def styled_bar_chart(df, x, y_cols, title, y_format=None, colors=None, barmode="
     fig = go.Figure()
     palette = colors or [COLORS["primary"], COLORS["success"], COLORS["danger"], COLORS["warning"]]
     valid_cols = [c for c in y_cols if c in df.columns]
-    plot_df = df.dropna(subset=valid_cols, how="all") if valid_cols else df
+    plot_df = df.dropna(subset=valid_cols, how="all").copy() if valid_cols else df.copy()
+    # Ensure x-axis is datetime for proper date formatting
+    if x in plot_df.columns:
+        plot_df[x] = pd.to_datetime(plot_df[x], errors="coerce")
+        plot_df = plot_df.dropna(subset=[x])
     for i, col in enumerate(valid_cols):
         fig.add_trace(go.Bar(
             x=plot_df[x], y=plot_df[col], name=col,
@@ -311,11 +319,34 @@ def load_consolidated_data(start_str: str, end_str: str, force_refresh: bool = F
 
     combined = pd.concat(all_kpis, ignore_index=True)
 
+    # Forward-fill stock-like columns (PL, ATIVO_TOTAL, etc.) per fund so that
+    # months where a fund hasn't reported yet use its last known value.
+    # Without this, the consolidated PL drops when one fund is missing a month.
+    all_dates = sorted(combined["DT_COMPTC"].dropna().unique())
+    stock_cols = [c for c in [
+        "PL", "ATIVO_TOTAL", "DC_PERFORMAR", "DC_NAO_PERFORMAR",
+        "NR_COTISTAS", "VALOR_COTA",
+    ] if c in combined.columns]
+
+    filled_frames = []
+    for fund_name, fund_df in combined.groupby("_fund_name"):
+        fund_df = fund_df.set_index("DT_COMPTC").reindex(all_dates)
+        fund_df["_fund_name"] = fund_name
+        # Forward-fill stock columns only (not flow columns like AQUISICOES, RESGATES)
+        for col in stock_cols:
+            if col in fund_df.columns:
+                fund_df[col] = fund_df[col].ffill()
+        fund_df.index.name = "DT_COMPTC"
+        fund_df = fund_df.reset_index()
+        filled_frames.append(fund_df)
+
+    combined = pd.concat(filled_frames, ignore_index=True)
+
     # Aggregate: sum additive columns, per date
     sum_cols = [c for c in [
         "PL", "ATIVO_TOTAL", "DC_PERFORMAR", "DC_NAO_PERFORMAR",
         "AQUISICOES", "RESGATES", "INADIMPLENCIA_VL", "INADIMPLENCIA_PROVISAO",
-        "SUBSTITUICAO",
+        "SUBSTITUICAO", "VENCIDOS_VL", "RECOMPRA_VL",
     ] if c in combined.columns]
 
     # NR_COTISTAS: sum across funds (each fund contributes its own cotistas)
@@ -1466,6 +1497,8 @@ with tab_compare:
                 cf_start = max(start_str, cf["start_date"][:7])
                 cf_kpi = load_comparison_data(cf["cnpj_raw"], cf_start, end_str, cf["name"])
                 if cf_kpi is not None and not cf_kpi.empty:
+                    # Ensure DT_COMPTC is datetime for chart rendering
+                    cf_kpi["DT_COMPTC"] = pd.to_datetime(cf_kpi["DT_COMPTC"], errors="coerce")
                     all_fund_kpis[cf["name"]] = cf_kpi
 
         if len(all_fund_kpis) < 2:
