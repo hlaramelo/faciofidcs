@@ -24,7 +24,7 @@ def compute_subordination_ratios(per_class: dict[str, pd.DataFrame]) -> pd.DataF
     # Find class columns
     senior_col = next((c for c in pl_df.columns if "Senior" in c), None)
     mez_col = next((c for c in pl_df.columns if "Mezanino" in c), None)
-    sub_col = next((c for c in pl_df.columns if "Subordinada" in c), None)
+    sub_col = next((c for c in pl_df.columns if "Subordinada" in c or "Junior" in c), None)
 
     # Total PL
     class_cols = [c for c in [senior_col, mez_col, sub_col] if c is not None]

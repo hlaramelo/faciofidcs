@@ -291,12 +291,27 @@ def load_data(start_str: str, end_str: str, cnpj_raw: str, fund_display_name: st
     return _process_fund_data(start_str, end_str, cnpj_raw, fund_display_name)
 
 
+def _extract_fund_short_name(name: str) -> str:
+    """Extract short fund label: 'Facio 4 FIDC Financeiros RL' -> 'Facio 4'.
+    'Facio FIDC Financeiros RL' -> 'Facio 1'.
+    """
+    import re as _re
+    m = _re.search(r"Facio\s*(\d+)", name)
+    if m:
+        return f"Facio {m.group(1)}"
+    # Original fund without a number
+    if "facio" in name.lower():
+        return "Facio 1"
+    return name[:20]
+
+
 def load_consolidated_data(start_str: str, end_str: str, force_refresh: bool = False):
     """Load and consolidate KPIs across all Facio funds."""
     import numpy as np
 
     all_kpis = []
     all_tables = {}
+    all_per_class = {}  # fund short name -> per_class dict
     cdi_df_out = None
 
     for fund in FUNDS:
@@ -311,6 +326,9 @@ def load_consolidated_data(start_str: str, end_str: str, force_refresh: bool = F
             kpi_copy = kpi.copy()
             kpi_copy["_fund_name"] = fund["name"]
             all_kpis.append(kpi_copy)
+        if per_class:
+            short_name = _extract_fund_short_name(fund["name"])
+            all_per_class[short_name] = per_class
         if cdi is not None and not cdi.empty:
             cdi_df_out = cdi
 
@@ -406,29 +424,12 @@ def load_consolidated_data(start_str: str, end_str: str, force_refresh: bool = F
         raw_pct = consolidated[col].pct_change(fill_method=None) * 100
         consolidated[f"{col}_MoM_%"] = raw_pct.where(cons_is_consecutive)
 
-    # Build per-fund breakdowns for consolidated per_class
-    cons_per_class = {}
+    # Build class-level breakdowns across all funds
+    # Each fund's per_class has "Cota - Senior", "PL - Senior", etc.
+    # We prefix with fund short name: "Facio 3 - Senior", "Facio 4 - Mezanino"
+    cons_per_class = _merge_per_class_across_funds(all_per_class)
 
-    # PL by fund
-    pl_by_fund = combined.pivot_table(
-        index="DT_COMPTC", columns="_fund_name", values="PL", aggfunc="sum",
-    )
-    if not pl_by_fund.empty:
-        pl_by_fund = pl_by_fund.reset_index().sort_values("DT_COMPTC")
-        pl_by_fund.columns = ["DT_COMPTC"] + [f"PL - {c}" for c in pl_by_fund.columns[1:]]
-        cons_per_class["pl_por_classe"] = pl_by_fund
-
-    # Cota by fund (each fund has its own cota value)
-    if "VALOR_COTA" in combined.columns:
-        cota_by_fund = combined.pivot_table(
-            index="DT_COMPTC", columns="_fund_name", values="VALOR_COTA", aggfunc="mean",
-        )
-        if not cota_by_fund.empty:
-            cota_by_fund = cota_by_fund.reset_index().sort_values("DT_COMPTC")
-            cota_by_fund.columns = ["DT_COMPTC"] + [f"Cota - {c}" for c in cota_by_fund.columns[1:]]
-            cons_per_class["cota_por_classe"] = cota_by_fund
-
-    # Rentabilidade by fund
+    # Also add fund-level rentabilidade (not class-level)
     if "RENTAB_MES" in combined.columns:
         rentab_by_fund = combined.pivot_table(
             index="DT_COMPTC", columns="_fund_name", values="RENTAB_MES", aggfunc="mean",
@@ -438,17 +439,56 @@ def load_consolidated_data(start_str: str, end_str: str, force_refresh: bool = F
             rentab_by_fund.columns = ["DT_COMPTC"] + [f"Rentab - {c}" for c in rentab_by_fund.columns[1:]]
             cons_per_class["rentab_por_fundo"] = rentab_by_fund
 
-    # Cotistas by fund
-    if "NR_COTISTAS" in combined.columns:
-        cotistas_by_fund = combined.pivot_table(
-            index="DT_COMPTC", columns="_fund_name", values="NR_COTISTAS", aggfunc="sum",
-        )
-        if not cotistas_by_fund.empty:
-            cotistas_by_fund = cotistas_by_fund.reset_index().sort_values("DT_COMPTC")
-            cotistas_by_fund.columns = ["DT_COMPTC"] + [f"Cotistas - {c}" for c in cotistas_by_fund.columns[1:]]
-            cons_per_class["cotistas_por_classe"] = cotistas_by_fund
-
     return consolidated, all_tables, cons_per_class, cdi_df_out
+
+
+def _merge_per_class_across_funds(all_per_class: dict) -> dict:
+    """Merge per-class DataFrames from multiple funds into combined DataFrames.
+
+    Input: {fund_short_name: {metric_key: DataFrame with 'Metric - Class' columns}}
+    Output: {metric_key: DataFrame with 'Metric - Fund - Class' columns}
+    """
+    metrics_to_merge = {
+        "pl_por_classe": "PL",
+        "cota_por_classe": "Cota",
+        "cotistas_por_classe": "Cotistas",
+    }
+
+    result = {}
+    for metric_key, label in metrics_to_merge.items():
+        frames = []
+        for fund_short, per_class in sorted(all_per_class.items()):
+            df = per_class.get(metric_key)
+            if df is None or df.empty:
+                continue
+            # Rename class columns: "Cota - Senior" -> "Cota - Facio 3 - Senior"
+            renamed = df.copy()
+            new_cols = {}
+            for col in renamed.columns:
+                if col == "DT_COMPTC":
+                    continue
+                # Extract the class name after the label prefix
+                # e.g. "Cota - Senior" -> "Senior", "PL - Mezanino" -> "Mezanino"
+                parts = col.split(" - ", 1)
+                if len(parts) == 2:
+                    class_name = parts[1]
+                else:
+                    class_name = col
+                new_cols[col] = f"{label} - {fund_short} - {class_name}"
+            renamed = renamed.rename(columns=new_cols)
+            frames.append(renamed)
+
+        if not frames:
+            continue
+
+        # Merge all fund DataFrames on DT_COMPTC
+        merged = frames[0]
+        for f in frames[1:]:
+            merged = merged.merge(f, on="DT_COMPTC", how="outer")
+        merged = merged.sort_values("DT_COMPTC").reset_index(drop=True)
+        result[metric_key] = merged
+
+    return result
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────

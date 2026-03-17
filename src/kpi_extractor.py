@@ -414,9 +414,27 @@ def _normalize_class_name(raw_name) -> str:
     if "SENIOR" in name or "SÊNIOR" in name or "SENIO" in name or "SÊNIO" in name:
         return "Senior"
     if "SUBORDINAD" in name or "JUNIOR" in name or "JÚNIOR" in name or "SUB " in name:
-        return "Subordinada"
+        return "Junior"
     # Fallback: return cleaned original
     return raw_name.strip().title()
+
+
+def _extract_fund_short_name(denom_social: str) -> str:
+    """Extract short fund label from DENOM_SOCIAL.
+
+    'Facio 4 Fundo De Investimento Em Direitos Creditórios ...' -> 'Facio 4'
+    'Facio 3 FIDC RL - Subclasse Senior Serie 1' -> 'Facio 3'
+    'Facio FIDC Financeiros RL' -> 'Facio 1'
+    """
+    if denom_social is None or (isinstance(denom_social, float) and pd.isna(denom_social)):
+        return "Desconhecido"
+    name = str(denom_social).strip()
+    m = re.search(r"Facio\s*(\d+)", name, re.IGNORECASE)
+    if m:
+        return f"Facio {m.group(1)}"
+    if "facio" in name.lower():
+        return "Facio 1"
+    return name[:20]
 
 
 def _pivot_by_class(
@@ -430,6 +448,9 @@ def _pivot_by_class(
 
     Searches tables in priority order. Looks for a class identifier column
     and a numeric value column matching the patterns.
+
+    When multiple funds are present, creates combined labels like
+    'Facio 3 - Senior', 'Facio 4 - Mezanino'.
     """
     # Possible class identifier columns (order matters: prefer specific over generic)
     class_col_candidates = [
@@ -457,7 +478,7 @@ def _pivot_by_class(
                 class_map = {
                     "tab_X_2": "Senior",
                     "tab_X_3": "Mezanino",
-                    "tab_X_4": "Subordinada",
+                    "tab_X_4": "Junior",
                 }
                 if table_name in class_map:
                     return _build_from_separate_tables(
@@ -481,7 +502,11 @@ def _pivot_by_class(
             continue
 
         # Pivot: rows=date, columns=class, values=numeric value
-        pivot_df = df[["DT_COMPTC", class_col, value_col]].copy()
+        # Include DENOM_SOCIAL if available for multi-fund labeling
+        cols_to_copy = ["DT_COMPTC", class_col, value_col]
+        if "DENOM_SOCIAL" in df.columns and "DENOM_SOCIAL" not in cols_to_copy:
+            cols_to_copy.append("DENOM_SOCIAL")
+        pivot_df = df[cols_to_copy].copy()
         pivot_df[value_col] = pd.to_numeric(pivot_df[value_col], errors="coerce")
         pivot_df = pivot_df.dropna(subset=[value_col, class_col])
 
@@ -491,18 +516,39 @@ def _pivot_by_class(
         # Normalize class names to top-level groups (Senior, Mezanino, Subordinada)
         pivot_df["_classe_grupo"] = pivot_df[class_col].apply(_normalize_class_name)
 
-        pivoted = pivot_df.pivot_table(
-            index="DT_COMPTC",
-            columns="_classe_grupo",
-            values=value_col,
-            aggfunc=agg_func,
-        )
+        # Detect if multiple funds are present (via DENOM_SOCIAL)
+        multi_fund = False
+        if "DENOM_SOCIAL" in pivot_df.columns:
+            fund_names_in_data = pivot_df["DENOM_SOCIAL"].dropna().apply(_extract_fund_short_name).unique()
+            multi_fund = len(fund_names_in_data) > 1
+
+        if multi_fund:
+            # Create combined fund+class label: "Facio 3 - Senior"
+            pivot_df["_fund_short"] = pivot_df["DENOM_SOCIAL"].apply(_extract_fund_short_name)
+            pivot_df["_full_label"] = pivot_df["_fund_short"] + " - " + pivot_df["_classe_grupo"]
+
+            pivoted = pivot_df.pivot_table(
+                index="DT_COMPTC",
+                columns="_full_label",
+                values=value_col,
+                aggfunc=agg_func,
+            )
+        else:
+            pivoted = pivot_df.pivot_table(
+                index="DT_COMPTC",
+                columns="_classe_grupo",
+                values=value_col,
+                aggfunc=agg_func,
+            )
 
         if pivoted.empty or pivoted.columns.empty:
             continue
 
         # Clean column names
         pivoted.columns = [f"{label} - {str(c).strip()}" for c in pivoted.columns]
+        # Sort columns for consistent ordering
+        sorted_cols = sorted(pivoted.columns)
+        pivoted = pivoted[sorted_cols]
         pivoted = pivoted.reset_index().sort_values("DT_COMPTC")
 
         print(f"  Per-class {label}: {len(pivoted)} months, classes: {list(pivoted.columns[1:])}")

@@ -277,6 +277,12 @@ def write_per_class_sheet(
         ws.cell(row=1, column=col_idx, value=col_name)
     style_header_row(ws, 1, len(display_cols))
 
+    # Detect column type from sheet/column names for proper formatting
+    sheet_upper = sheet_name.upper()
+    is_cota = "COTA" in sheet_upper
+    is_cotistas = "COTIST" in sheet_upper
+    is_pct = any(kw in sheet_upper for kw in ["%", "RENTAB", "TAXA", "SUBORDIN"])
+
     # Data rows
     for row_idx, (_, data_row) in enumerate(subset.iterrows(), 2):
         ws.cell(row=row_idx, column=1, value=data_row["DT_COMPTC"]).border = THIN_BORDER
@@ -284,7 +290,15 @@ def write_per_class_sheet(
             cell = ws.cell(row=row_idx, column=col_idx, value=data_row[col_name])
             cell.border = THIN_BORDER
             if isinstance(cell.value, (int, float)):
-                cell.number_format = BRL_FORMAT
+                col_upper = col_name.upper()
+                if is_cota or "COTA" in col_upper:
+                    cell.number_format = '#,##0.000000'
+                elif is_cotistas or "COTIST" in col_upper:
+                    cell.number_format = INTEGER_FORMAT
+                elif is_pct or "%" in col_upper or "RENTAB" in col_upper:
+                    cell.number_format = PCT_FORMAT
+                else:
+                    cell.number_format = BRL_FORMAT
 
     num_data_rows = len(subset)
     auto_column_width(ws)
@@ -331,6 +345,12 @@ def _create_styled_chart(chart_type: str, title: str):
     if any(kw in title_upper for kw in ["RENTAB", "%", "TAXA", "INADIMP"]):
         chart.y_axis.title = "%"
         chart.y_axis.numFmt = '0.00"%"'
+    elif "COTA" in title_upper:
+        chart.y_axis.title = "Valor da Cota"
+        chart.y_axis.numFmt = '#,##0.000000'
+    elif "COTIST" in title_upper:
+        chart.y_axis.title = "Cotistas"
+        chart.y_axis.numFmt = '#,##0'
     else:
         chart.y_axis.title = "Valor (R$)"
         chart.y_axis.numFmt = '#,##0'
